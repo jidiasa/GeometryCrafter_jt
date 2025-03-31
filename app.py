@@ -268,20 +268,23 @@ def build_demo():
     with gr.Blocks(analytics_enabled=False) as gradio_demo:
         gr.Markdown(
             """
-            <div align='center'> <h1> GeometryCrafter: Consistent Geometry Estimation for Open-world Videos with Diffusion Priors </span> </h1> \
-                        <h2 style='font-weight: 450; font-size: 1rem; margin: 0rem'>\
-                        <a href='https://scholar.google.com/citations?user=zHp0rMIAAAAJ'>Tian-Xing Xu</a>, \
-                        <a href='https://scholar.google.com/citations?user=qgdesEcAAAAJ'>Xiangjun Gao</a>, \
-                        <a href='https://wbhu.github.io'>Wenbo Hu</a>, \
-                        <a href='https://xiaoyu258.github.io/'>Xiaoyu Li</a>, \
-                        <a href='https://scholar.google.com/citations?user=AWtV-EQAAAAJ'>Song-Hai Zhang</a>,\
-                        <a href='https://scholar.google.com/citations?user=4oXBp9UAAAAJ'>Ying Shan</a>\
-                    </h2> \
-                    <span style='font-size:18px'>If you find GeometryCrafter useful, please help ⭐ the \
-                    <a style='font-size:18px' href='https://github.com/Tencent/GeometryCrafter/'>[Github Repo]</a>\
+            <div align='center'> 
+                <h1> GeometryCrafter: Consistent Geometry Estimation for Open-world Videos with Diffusion Priors </h1> \
+                <h2 style='font-weight: 450; font-size: 1rem; margin: 0rem'>\
+                    <a href='https://scholar.google.com/citations?user=zHp0rMIAAAAJ'>Tian-Xing Xu</a>, \
+                    <a href='https://scholar.google.com/citations?user=qgdesEcAAAAJ'>Xiangjun Gao</a>, \
+                    <a href='https://wbhu.github.io'>Wenbo Hu</a>, \
+                    <a href='https://xiaoyu258.github.io/'>Xiaoyu Li</a>, \
+                    <a href='https://scholar.google.com/citations?user=AWtV-EQAAAAJ'>Song-Hai Zhang</a>,\
+                    <a href='https://scholar.google.com/citations?user=4oXBp9UAAAAJ'>Ying Shan</a>\
+                </h2> \
+                <span style='font-size:18px'>If you find GeometryCrafter useful, please help ⭐ the \
+                    <a style='font-size:18px' href='https://github.com/TencentARC/GeometryCrafter/'>[Github Repo]</a>\
                     , which is important to Open-Source projects. Thanks!\
-                        <a style='font-size:18px' href='https://arxiv.org'> [ArXivTODO] </a>\
-                        <a style='font-size:18px' href='https://geometrycrafter.github.io'> [Project Page] </a> </span> </div>
+                    <a style='font-size:18px' href='https://arxiv.org'> [ArXivTODO] </a>\
+                    <a style='font-size:18px' href='https://geometrycrafter.github.io'> [Project Page] </a> 
+                </span> 
+            </div>
             """
         )
 
@@ -381,13 +384,13 @@ def build_demo():
         gr.Markdown(
             """
             <span style='font-size:18px'>Note: 
-            For time quota consideration, we set the default parameters to be more efficient here,
-            with a trade-off of shorter video length and slightly lower quality.
-            You may adjust the parameters according to our 
-            <a style='font-size:18px' href='https://github.com/Tencent/GeometryCrafter/'>[Github Repo]</a>
-            for better results if you have enough time quota. We only provide a simplified visualization
-            script in this page due to the lack of support for point cloud sequences. You can download
-            the npz file and open it with Viser backend in our repo for better visualization. 
+                For time quota consideration, we set the default parameters to be more efficient here,
+                with a trade-off of shorter video length and slightly lower quality.
+                You may adjust the parameters according to our 
+                <a style='font-size:18px' href='https://github.com/TencentARC/GeometryCrafter/'>[Github Repo]</a>
+                for better results if you have enough time quota. We only provide a simplified visualization
+                script in this page due to the lack of support for point cloud sequences. You can download
+                the npz file and open it with Viser backend in our repo for better visualization. 
             </span>
             """
         )

@@ -17,7 +17,7 @@ _**[Tian-Xing Xu<sup>1</sup>](https://scholar.google.com/citations?user=zHp0rMIA
 ![Version](https://img.shields.io/badge/version-1.0.0-blue) &nbsp;
  <a href='https://arxiv.org'><img src='https://img.shields.io/badge/arXiv-TODO-b31b1b.svg'></a> &nbsp;
  <a href='https://geometrycrafter.github.io'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
- <a href='https://huggingface.co/spaces/tencent/GeometryCrafter'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue'></a> &nbsp;
+ <a href='https://huggingface.co/spaces/TencentARC/GeometryCrafter'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue'></a> &nbsp;
 
 </div>
 
@@ -41,7 +41,7 @@ Release Notes:
 ### Installation
 1. Clone this repo:
 ```bash
-git clone --recursive https://github.com/Tencent/GeometryCrafter
+git clone --recursive https://github.com/TencentARC/GeometryCrafter
 ```
 2. Install dependencies (please refer to [requirements.txt](requirements.txt)):
 ```bash
@@ -91,7 +91,7 @@ python visualize/vis_point_maps.py \
 
 ## 🤖 Gradio Demo
 
-- Online demo: [**GeometryCrafter**](https://huggingface.co/spaces/tencent/GeometryCrafter)
+- Online demo: [**GeometryCrafter**](https://huggingface.co/spaces/TencentARC/GeometryCrafter)
 - Local demo:
   ```bash
   gradio app.py
