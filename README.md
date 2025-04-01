@@ -50,7 +50,7 @@ pip install -r requirements.txt
 
 ### Inference
 
-Run inference code on our provided demo videos, requires a GPU with ~40GB memory for 110 frames with 1024x576 resolution:
+Run inference code on our provided demo videos at 1.27FPS, which requires a GPU with ~40GB memory for 110 frames with 1024x576 resolution:
 
 ```bash
 python run.py \
@@ -62,7 +62,7 @@ python run.py \
   # you can use --downsample_ratio to downsample the input video or reduce --decode_chunk_size to save the memory usage
 ```
 
-Run inference code with our deterministic variant
+Run inference code with our deterministic variant at 1.50 FPS
 
 ```bash
 python run.py \
@@ -72,7 +72,7 @@ python run.py \
   --model_type determ
 ```
 
-Run low-resolution inference requires a GPU with ~22GB memory for 640x384 resolution:
+Run low-resolution processing at 2.49 FPS, which requires a GPU with ~22GB memory:
 
 ```bash
 python run.py \
