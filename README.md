@@ -1,4 +1,4 @@
-## ___***GeometryCrafter: Generating Consistent Long Depth Sequences for Open-world Videos***___
+## ___***GeometryCrafter: Consistent Geometry Estimation for Open-world Videos with Diffusion Priors***___
 <div align="center">
 <img src='assets/logo.png' style="height:100px"></img>
 <br>
