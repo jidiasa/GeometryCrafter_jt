@@ -91,7 +91,7 @@ if __name__ == '__main__':
         gui_prev_frame = server.gui.add_button("Prev Frame", disabled=False)
         gui_playing = server.gui.add_checkbox("Playing", False)
         gui_framerate = server.gui.add_slider(
-            "FPS", min=1, max=60, step=1, initial_value=20
+            "FPS", min=1, max=60, step=1, initial_value=round(vid.get_avg_fps())
         )
         gui_framerate_options = server.gui.add_button_group(
             "FPS options", ("10", "20", "30", "60")

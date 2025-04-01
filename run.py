@@ -18,7 +18,7 @@ from geometrycrafter import (
 def main(
     video_path: str,
     save_folder: str = "workspace/output/",
-    cache_dir: str = "pretrained_models", 
+    cache_dir: str = "workspace/cache", 
     height: int = None,
     width: int = None,
     downsample_ratio: float = 1.0,
@@ -39,34 +39,37 @@ def main(
     assert model_type in ['diff', 'determ']
     set_seed(seed)
     unet = UNetSpatioTemporalConditionModelVid2vid.from_pretrained(
-        os.path.join(cache_dir, 'GeometryCrafter'),
+        'TencentARC/GeometryCrafter',
         subfolder='unet_diff' if model_type == 'diff' else 'unet_determ',
         low_cpu_mem_usage=True,
         torch_dtype=torch.float16,
         cache_dir=cache_dir
     ).requires_grad_(False).to("cuda", dtype=torch.float16)
     point_map_vae = PMapAutoencoderKLTemporalDecoder.from_pretrained(
-        os.path.join(cache_dir, 'GeometryCrafter'),
+        'TencentARC/GeometryCrafter',
         subfolder='point_map_vae',
         low_cpu_mem_usage=True,
-        torch_dtype=torch.float32
+        torch_dtype=torch.float32,
+        cache_dir=cache_dir
     ).requires_grad_(False).to("cuda", dtype=torch.float32)
     prior_model = MoGe(
         cache_dir=cache_dir,
     ).requires_grad_(False).to('cuda', dtype=torch.float32)
     if model_type == 'diff':
         pipe = GeometryCrafterDiffPipeline.from_pretrained(
-            os.path.join(cache_dir, 'stable-video-diffusion-img2vid-xt-1-1'),
+            "stabilityai/stable-video-diffusion-img2vid-xt",
             unet=unet,
             torch_dtype=torch.float16,
             variant="fp16",
+            cache_dir=cache_dir
         ).to("cuda")
     else:
         pipe = GeometryCrafterDetermPipeline.from_pretrained(
-            os.path.join(cache_dir, 'stable-video-diffusion-img2vid-xt-1-1'),
+            "stabilityai/stable-video-diffusion-img2vid-xt",
             unet=unet,
             torch_dtype=torch.float16,
             variant="fp16",
+            cache_dir=cache_dir
         ).to("cuda")
 
     
