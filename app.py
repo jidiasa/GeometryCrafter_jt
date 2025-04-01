@@ -40,37 +40,40 @@ examples = [
 ]
 
 model_type = 'diff'
-cache_dir = 'pretrained_models'
+cache_dir = 'workspace/cache'
 
 unet = UNetSpatioTemporalConditionModelVid2vid.from_pretrained(
-    os.path.join(cache_dir, 'GeometryCrafter'),
+    'TencentARC/GeometryCrafter',
     subfolder='unet_diff' if model_type == 'diff' else 'unet_determ',
     low_cpu_mem_usage=True,
     torch_dtype=torch.float16,
     cache_dir=cache_dir
 ).requires_grad_(False).to("cuda", dtype=torch.float16)
 point_map_vae = PMapAutoencoderKLTemporalDecoder.from_pretrained(
-    os.path.join(cache_dir, 'GeometryCrafter'),
+    'TencentARC/GeometryCrafter',
     subfolder='point_map_vae',
     low_cpu_mem_usage=True,
-    torch_dtype=torch.float32
+    torch_dtype=torch.float32,
+    cache_dir=cache_dir
 ).requires_grad_(False).to("cuda", dtype=torch.float32)
 prior_model = MoGe(
     cache_dir=cache_dir,
 ).requires_grad_(False).to('cuda', dtype=torch.float32)
 if model_type == 'diff':
     pipe = GeometryCrafterDiffPipeline.from_pretrained(
-        os.path.join(cache_dir, 'stable-video-diffusion-img2vid-xt-1-1'),
+        'stabilityai/stable-video-diffusion-img2vid-xt',
         unet=unet,
         torch_dtype=torch.float16,
         variant="fp16",
+        cache_dir=cache_dir
     ).to("cuda")
 else:
     pipe = GeometryCrafterDetermPipeline.from_pretrained(
-        os.path.join(cache_dir, 'stable-video-diffusion-img2vid-xt-1-1'),
+        'stabilityai/stable-video-diffusion-img2vid-xt',
         unet=unet,
         torch_dtype=torch.float16,
         variant="fp16",
+        cache_dir=cache_dir
     ).to("cuda")
 
 try:
@@ -335,7 +338,7 @@ def build_demo():
                             label="decode chunk size",
                             minimum=1,
                             maximum=16,
-                            value=8,
+                            value=6,
                             step=1,
                         )
                         overlap = gr.Slider(
