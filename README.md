@@ -57,7 +57,9 @@ python run.py \
   --video_path examples/video1.mp4 \
   --save_folder workspace/examples_output \
   --height 576 --width 1024
-  # resize video to the target resolution for processing, which should be divided by 64 
+  # resize the input video to the target resolution for processing, which should be divided by 64 
+  # the output point maps will be restored to the original resolution before saving
+  # you can use --downsample_ratio to downsample the input video or reduce --decode_chunk_size to save the memory usage
 ```
 
 Run inference code with our deterministic variant
