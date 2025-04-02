@@ -85,10 +85,6 @@ except Exception as e:
 # pipe.enable_xformers_memory_efficient_attention()
 pipe.enable_attention_slicing()
 
-mesh_seqs = []
-frame_seqs = []
-cur_mesh_idx = None
-
 def read_video_frames(video_path, process_length, max_res):
     print("==> processing video: ", video_path)
     vid = VideoReader(video_path, ctx=cpu(0))
@@ -131,12 +127,10 @@ def infer_geometry(
     decode_chunk_size: int,
     overlap: int,
     downsample_ratio: float = 1.0, # downsample pcd for visualization
-    num_sample_frames: int =8, # downsample frames for visualization
     remove_edge: bool = True, # remove edge for visualization
     save_folder: str = os.path.join('workspace', 'GeometryCrafterApp'),
 ):
     try:
-        global cur_mesh_idx, mesh_seqs, frame_seqs
         run_id = str(uuid.uuid4())
         set_seed(42)
         pipe.enable_xformers_memory_efficient_attention()
@@ -167,6 +161,8 @@ def infer_geometry(
         point_maps = point_maps.cpu()
         valid_masks = valid_masks.cpu()
 
+        os.makedirs(save_folder, exist_ok=True)
+
         gc.collect()
         torch.cuda.empty_cache()
         output_npz_path = Path(save_folder, run_id, f'point_maps.npz')
@@ -176,7 +172,7 @@ def infer_geometry(
         np.savez_compressed(
             output_npz_path,
             point_map=point_maps.cpu().numpy().astype(np.float16),
-            valid_mask=valid_masks.cpu().numpy().astype(np.bool_)
+            mask=valid_masks.cpu().numpy().astype(np.bool_)
         )
 
         output_disp_path = Path(save_folder, run_id, f'disp.mp4')
@@ -204,11 +200,10 @@ def infer_geometry(
                 edge_mask = compute_edge_mask(point_maps[i, :, :, 2], 3)
                 valid_masks[i] = valid_masks[i] & (~edge_mask)
 
-        indices = np.linspace(0, len(point_maps)-1, num_sample_frames)
+        indices = np.linspace(0, len(point_maps)-1, 6)
         indices = np.round(indices).astype(np.int32)
-        
-        mesh_seqs.clear()
-        cur_mesh_idx = None
+
+        mesh_seqs, frame_seqs = [], []
 
         for index in indices:
 
@@ -222,20 +217,17 @@ def infer_geometry(
             mesh_seqs.append(output_glb_path)
             frame_seqs.append(index)
         
-        cur_mesh_idx = 0
         
         gc.collect()
         torch.cuda.empty_cache()
         
         return [
-            gr.Model3D(value=mesh_seqs[cur_mesh_idx], label=f"Frame: {frame_seqs[cur_mesh_idx]}"), 
+            gr.Model3D(value=mesh_seqs[idx], label=f"Frame: {frame_seqs[idx]}") for idx in range(len(frame_seqs))
+        ] + [ 
             gr.Video(value=output_disp_path, label="Disparity", interactive=False), 
-            gr.DownloadButton("Download Npz File", value=output_npz_path, visible=True)
+            gr.DownloadButton("Download Npz File", value=output_npz_path)
         ]
     except Exception as e:
-        mesh_seqs.clear()
-        frame_seqs.clear()
-        cur_mesh_idx = None
         gc.collect()
         torch.cuda.empty_cache()
         raise gr.Error(str(e))
@@ -249,43 +241,27 @@ def infer_geometry(
         #     gr.DownloadButton("Download Npz File", visible=False)
         # ]
 
-def goto_prev_frame():
-    global cur_mesh_idx, mesh_seqs, frame_seqs
-    if cur_mesh_idx is not None and len(mesh_seqs) > 0:
-        if cur_mesh_idx > 0:
-            cur_mesh_idx -= 1
-        return gr.Model3D(value=mesh_seqs[cur_mesh_idx], label=f"Frame: {frame_seqs[cur_mesh_idx]}")
-        
-
-def goto_next_frame():
-    global cur_mesh_idx, mesh_seqs, frame_seqs
-    if cur_mesh_idx is not None and len(mesh_seqs) > 0:
-        if cur_mesh_idx < len(mesh_seqs)-1:
-            cur_mesh_idx += 1
-        return gr.Model3D(value=mesh_seqs[cur_mesh_idx], label=f"Frame: {frame_seqs[cur_mesh_idx]}")
-
-def download_file():
-    return gr.DownloadButton(visible=False)
-
 def build_demo():
     with gr.Blocks(analytics_enabled=False) as gradio_demo:
-        gr.Markdown(
+        gr.HTML(
             """
             <div align='center'> 
                 <h1> GeometryCrafter: Consistent Geometry Estimation for Open-world Videos with Diffusion Priors </h1> \
-                <h2 style='font-weight: 450; font-size: 1rem; margin: 0rem'>\
+                <span style='font-size:18px'>\
                     <a href='https://scholar.google.com/citations?user=zHp0rMIAAAAJ'>Tian-Xing Xu</a>, \
                     <a href='https://scholar.google.com/citations?user=qgdesEcAAAAJ'>Xiangjun Gao</a>, \
                     <a href='https://wbhu.github.io'>Wenbo Hu</a>, \
                     <a href='https://xiaoyu258.github.io/'>Xiaoyu Li</a>, \
                     <a href='https://scholar.google.com/citations?user=AWtV-EQAAAAJ'>Song-Hai Zhang</a>,\
                     <a href='https://scholar.google.com/citations?user=4oXBp9UAAAAJ'>Ying Shan</a>\
-                </h2> \
+                </span> \
+                <br>
+                <br>
                 <span style='font-size:18px'>If you find GeometryCrafter useful, please help ⭐ the \
                     <a style='font-size:18px' href='https://github.com/TencentARC/GeometryCrafter/'>[Github Repo]</a>\
                     , which is important to Open-Source projects. Thanks!\
-                    <a style='font-size:18px' href='https://arxiv.org'> [ArXivTODO] </a>\
-                    <a style='font-size:18px' href='https://geometrycrafter.github.io'> [Project Page] </a> 
+                    <a href='https://arxiv.org/abs/2504.01016'>[arXiv]</a> \
+                    <a href='https://geometrycrafter.github.io'>[Project Page]</a> \
                 </span> 
             </div>
             """
@@ -351,23 +327,58 @@ def build_demo():
                     generate_btn = gr.Button("Generate")
 
             with gr.Column(scale=1):
-                output_point_maps = gr.Model3D(
-                    label="Point Map",
-                    clear_color=[1.0, 1.0, 1.0, 1.0],
-                    # display_mode="solid"
-                    interactive=False
-                )
-                with gr.Row():
-                    prev_btn = gr.Button("Prev")
-                    next_btn = gr.Button("Next")
-
-            with gr.Column(scale=1):
                 output_disp_video = gr.Video(
                     label="Disparity",
                     interactive=False
                 )
-                download_btn = gr.DownloadButton("Download Npz File", visible=False)
+                download_btn = gr.DownloadButton("Download Npz File")
 
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1):
+                output_point_map0 = gr.Model3D(
+                    label="Point Map 0",
+                    clear_color=[1.0, 1.0, 1.0, 1.0],
+                    # display_mode="solid"
+                    interactive=False
+                )
+            with gr.Column(scale=1):
+                output_point_map1 = gr.Model3D(
+                    label="Point Map 1",
+                    clear_color=[1.0, 1.0, 1.0, 1.0],
+                    # display_mode="solid"
+                    interactive=False
+                )
+            with gr.Column(scale=1):
+                output_point_map2 = gr.Model3D(
+                    label="Point Map 2",
+                    clear_color=[1.0, 1.0, 1.0, 1.0],
+                    # display_mode="solid"
+                    interactive=False
+                )
+        
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1):
+                output_point_map3 = gr.Model3D(
+                    label="Point Map 3",
+                    clear_color=[1.0, 1.0, 1.0, 1.0],
+                    # display_mode="solid"
+                    interactive=False
+                )
+            with gr.Column(scale=1):
+                output_point_map4 = gr.Model3D(
+                    label="Point Map 4",
+                    clear_color=[1.0, 1.0, 1.0, 1.0],
+                    # display_mode="solid"
+                    interactive=False
+                )
+            with gr.Column(scale=1):
+                output_point_map5 = gr.Model3D(
+                    label="Point Map 5",
+                    clear_color=[1.0, 1.0, 1.0, 1.0],
+                    # display_mode="solid"
+                    interactive=False
+                )
+        
         gr.Examples(
             examples=examples,
             fn=infer_geometry,
@@ -381,19 +392,23 @@ def build_demo():
                 decode_chunk_size,
                 overlap,
             ],
-            outputs=[output_point_maps, output_disp_video, download_btn],            
+            outputs=[
+                output_point_map0, output_point_map1, output_point_map2,
+                output_point_map3, output_point_map4, output_point_map5,
+                output_disp_video, download_btn
+            ],            
             # cache_examples="lazy",
         )
-        gr.Markdown(
+        gr.HTML(
             """
-            <span style='font-size:18px'>Note: 
-                For time quota consideration, we set the default parameters to be more efficient here,
-                with a trade-off of shorter video length and slightly lower quality.
-                You may adjust the parameters according to our 
-                <a style='font-size:18px' href='https://github.com/TencentARC/GeometryCrafter/'>[Github Repo]</a>
-                for better results if you have enough time quota. We only provide a simplified visualization
-                script in this page due to the lack of support for point cloud sequences. You can download
-                the npz file and open it with Viser backend in our repo for better visualization. 
+            <span style='font-size:18px'>Note: \
+                For time quota consideration, we set the default parameters to be more efficient here,\
+                with a trade-off of shorter video length and slightly lower quality.\
+                You may adjust the parameters according to our \
+                <a href='https://github.com/TencentARC/GeometryCrafter/'>[Github Repo]</a>\
+                for better results if you have enough time quota. We only provide a simplified visualization\
+                script in this page due to the lack of support for point cloud sequences. You can download\
+                the npz file and open it with Viser backend in our repo for better visualization. \
             </span>
             """
         )
@@ -410,20 +425,11 @@ def build_demo():
                 decode_chunk_size,
                 overlap,
             ],
-            outputs=[output_point_maps, output_disp_video, download_btn],
-        )
-
-        prev_btn.click(
-            fn=goto_prev_frame,
-            outputs=output_point_maps,
-        )
-        next_btn.click(
-            fn=goto_next_frame,
-            outputs=output_point_maps,
-        )
-        download_btn.click(
-            fn=download_file,
-            outputs=download_btn
+            outputs=[
+                output_point_map0, output_point_map1, output_point_map2,
+                output_point_map3, output_point_map4, output_point_map5,
+                output_disp_video, download_btn
+            ],
         )
 
     return gradio_demo
@@ -432,5 +438,5 @@ def build_demo():
 if __name__ == "__main__":
     demo = build_demo()
     demo.queue()
-    demo.launch(server_name="0.0.0.0", server_port=12345, debug=True, share=False)
-    # demo.launch(share=True)
+    # demo.launch(server_name="0.0.0.0", server_port=12345, debug=True, share=False)
+    demo.launch(share=True)
