@@ -15,7 +15,7 @@ _**[Tian-Xing Xu<sup>1</sup>](https://scholar.google.com/citations?user=zHp0rMIA
 <sup>3</sup>HKUST
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue) &nbsp;
- <a href='https://arxiv.org'><img src='https://img.shields.io/badge/arXiv-TODO-b31b1b.svg'></a> &nbsp;
+ <a href='https://arxiv.org/abs/2504.01016'><img src='https://img.shields.io/badge/arXiv-2504.01016-b31b1b.svg'></a> &nbsp;
  <a href='https://geometrycrafter.github.io'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
  <a href='https://huggingface.co/spaces/TencentARC/GeometryCrafter'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue'></a> &nbsp;
 
