@@ -34,7 +34,7 @@ If you find GeometryCrafter useful, **please help ⭐ this repo**, which is impo
 We present GeometryCrafter, a novel approach that estimates temporally consistent, high-quality point maps from open-world videos, facilitating downstream applications such as 3D/4D reconstruction and depth-based video editing or generation.
 
 Release Notes:
-- `[07/04/2025]` 🔥🔥🔥**GeometryCrafter** is released now, have fun!
+- `[01/04/2025]` 🔥🔥🔥**GeometryCrafter** is released now, have fun!
 
 ## 🚀 Quick Start
 
