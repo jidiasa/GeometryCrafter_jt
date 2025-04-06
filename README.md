@@ -132,5 +132,10 @@ Please check the `evaluation` folder.
 If you find this work helpful, please consider citing:
 
 ```BibTeXw
-  TODO
+@article{xu2025geometrycrafter,
+  title={GeometryCrafter: Consistent Geometry Estimation for Open-world Videos with Diffusion Priors},
+  author={Xu, Tian-Xing and Gao, Xiangjun and Hu, Wenbo and Li, Xiaoyu and Zhang, Song-Hai and Shan, Ying},
+  journal={arXiv preprint arXiv:2504.01016},
+  year={2025}
+}
 ```
