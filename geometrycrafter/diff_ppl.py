@@ -109,7 +109,7 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
     @torch.inference_mode()
     def produce_priors(self, prior_model, frame, chunk_size=8):
         T, _, H, W = frame.shape 
-        frame = (frame + 1) / 2
+        # frame = (frame + 1) / 2
         pred_point_maps = []
         pred_masks = []
         for i in range(0, len(frame), chunk_size):

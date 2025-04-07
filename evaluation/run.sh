@@ -14,7 +14,7 @@ model_type=$7
 CUDA_VISIBLE_DEVICES=${gpu_id} PYTHONPATH=. python run.py \
   --video_path ${video_path} \
   --save_folder ${save_folder} \
-  --cache_dir pretrained_models \
+  --cache_dir workspace/cache \
   --height ${height} \
   --width ${width} \
   --downsample_ratio ${downsample_ratio} \
