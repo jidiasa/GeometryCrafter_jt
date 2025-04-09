@@ -188,8 +188,11 @@ class GeometryCrafterDetermPipeline(StableVideoDiffusionPipeline):
         rec_valid_masks = torch.cat(rec_valid_masks, dim=0)
         
         if need_resize:
-            rec_depth_maps = F.interpolate(rec_depth_maps, (height, width), mode='nearest-exact') if use_extract_interp else F.interpolate(rec_depth_maps, (height, width), mode='bilinear', align_corners=False)
-            rec_valid_masks = F.interpolate(rec_valid_masks, (height, width), mode='nearest-exact') if use_extract_interp else F.interpolate(rec_valid_masks, (height, width), mode='bilinear', align_corners=False)
+            # transform the log-depth to depth domain for bilinear interpolation
+            rec_depth_maps = F.interpolate(rec_depth_maps, (height, width), mode='nearest-exact') if use_extract_interp else \
+                F.interpolate(rec_depth_maps.clamp_max(10).exp(), (height, width), mode='bilinear', align_corners=False).log()
+            rec_valid_masks = F.interpolate(rec_valid_masks, (height, width), mode='nearest-exact') if use_extract_interp else \
+                F.interpolate(rec_valid_masks, (height, width), mode='bilinear', align_corners=False)
             rec_intrinsic_maps = F.interpolate(rec_intrinsic_maps, (height, width), mode='bilinear', align_corners=False)
 
         H, W = rec_intrinsic_maps.shape[-2], rec_intrinsic_maps.shape[-1]
@@ -293,7 +296,11 @@ class GeometryCrafterDetermPipeline(StableVideoDiffusionPipeline):
         if need_resize:
             pred_disparity = F.interpolate(pred_disparity.unsqueeze(1), (height, width), mode='bilinear', align_corners=False).squeeze(1)
             pred_valid_mask = F.interpolate(pred_valid_mask.unsqueeze(1), (height, width), mode='bilinear', align_corners=False).squeeze(1)
-            pred_point_map = F.interpolate(pred_point_map, (height, width), mode='bilinear', align_corners=False)
+            # transform the log-depth to depth domain for bilinear interpolation
+            pred_point_map = torch.cat([
+                F.interpolate(pred_point_map[:, 0:2], (height, width), mode='bilinear', align_corners=False),
+                F.interpolate(pred_point_map[:, 2:3].clamp_max(10).exp(), (height, width), mode='bilinear', align_corners=False).log()
+            ], dim=1)
             pred_intrinsic_map = F.interpolate(pred_intrinsic_map, (height, width), mode='bilinear', align_corners=False)
 
         if track_time:
