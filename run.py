@@ -34,7 +34,8 @@ def main(
     force_projection: bool = True,
     force_fixed_focal: bool = True,
     use_extract_interp: bool = False,
-    track_time: bool = False
+    track_time: bool = False,
+    low_memory_usage: bool = False
 ):
     assert model_type in ['diff', 'determ']
     set_seed(seed)
@@ -128,7 +129,8 @@ def main(
             force_projection=force_projection,
             force_fixed_focal=force_fixed_focal,
             use_extract_interp=use_extract_interp,
-            track_time=track_time
+            track_time=track_time,
+            low_memory_usage=low_memory_usage
         )
 
         if downsample_ratio > 1.0:

@@ -34,6 +34,7 @@ If you find GeometryCrafter useful, **please help ⭐ this repo**, which is impo
 We present GeometryCrafter, a novel approach that estimates temporally consistent, high-quality point maps from open-world videos, facilitating downstream applications such as 3D/4D reconstruction and depth-based video editing or generation.
 
 Release Notes:
+- `[14/04/2025]` 🚀🚀🚀 We provide a `low_memory_usage` option in pipeline for saving GPU memory usage, thanks to [calledit](https://github.com/calledit)'s helpful suggestion. 
 - `[01/04/2025]` 🔥🔥🔥**GeometryCrafter** is released now, have fun!
 
 ## 🚀 Quick Start
@@ -79,6 +80,17 @@ python run.py \
   --video_path examples/video1.mp4 \
   --save_folder workspace/examples_output \
   --height 384 --width 640
+```
+
+Run low-resolution processing at 1.76 FPS with <20GB memory usage, following the advice of [calledit](https://github.com/calledit) in [Pull Request 1](https://github.com/TencentARC/GeometryCrafter/pull/1):
+
+```bash
+python run.py \
+  --video_path examples/video1.mp4 \
+  --save_folder workspace/examples_output \
+  --height 384 --width 640 \
+  --low_memory_usage True \
+  --decode_chunk_size 6
 ```
 
 ### Visualization

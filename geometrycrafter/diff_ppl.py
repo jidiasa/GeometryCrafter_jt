@@ -107,15 +107,17 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         return video_latents
     
     @torch.inference_mode()
-    def produce_priors(self, prior_model, frame, chunk_size=8):
+    def produce_priors(self, prior_model, frame, chunk_size=8, low_memory_usage=False):
         T, _, H, W = frame.shape 
         # frame = (frame + 1) / 2
         pred_point_maps = []
         pred_masks = []
         for i in range(0, len(frame), chunk_size):
-            pred_p, pred_m = prior_model.forward_image(frame[i:i+chunk_size])
-            pred_point_maps.append(pred_p)
-            pred_masks.append(pred_m)
+            pred_p, pred_m = prior_model.forward_image(
+                frame[i:i+chunk_size].to(self._execution_device) if low_memory_usage else frame[i:i+chunk_size]
+            )
+            pred_point_maps.append(pred_p.cpu() if low_memory_usage else pred_p)
+            pred_masks.append(pred_m.cpu() if low_memory_usage else pred_m)
         pred_point_maps = torch.cat(pred_point_maps, dim=0)
         pred_masks = torch.cat(pred_masks, dim=0)
         
@@ -139,7 +141,7 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         return pred_disps, pred_masks, pred_point_maps, pred_intr_maps
     
     @torch.inference_mode()
-    def encode_point_map(self, point_map_vae, disparity, valid_mask, point_map, intrinsic_map, chunk_size=8):
+    def encode_point_map(self, point_map_vae, disparity, valid_mask, point_map, intrinsic_map, chunk_size=8, low_memory_usage=False):
         T, _, H, W = point_map.shape
         latents = []
 
@@ -147,13 +149,16 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         intrinsic_map = torch.norm(intrinsic_map[:, 2:4], p=2, dim=1, keepdim=False)
 
         for i in range(0, T, chunk_size):
-            latent_dist = self.vae.encode(psedo_image[i : i + chunk_size].to(self.vae.dtype)).latent_dist
+            latent_dist = self.vae.encode(
+                psedo_image[i : i + chunk_size].to(dtype=self.vae.dtype, device=self._execution_device) if low_memory_usage else psedo_image[i : i + chunk_size].to(self.vae.dtype)
+            ).latent_dist
             latent_dist = point_map_vae.encode(                
                 torch.cat([
-                    intrinsic_map[i:i+chunk_size, None],
-                    point_map[i:i+chunk_size, 2:3], 
-                    disparity[i:i+chunk_size, None], 
-                    valid_mask[i:i+chunk_size, None]], dim=1),
+                    intrinsic_map[i:i+chunk_size, None].to(self._execution_device) if low_memory_usage else intrinsic_map[i:i+chunk_size, None],
+                    point_map[i:i+chunk_size, 2:3].to(self._execution_device) if low_memory_usage else point_map[i:i+chunk_size, 2:3], 
+                    disparity[i:i+chunk_size, None].to(self._execution_device) if low_memory_usage else disparity[i:i+chunk_size, None], 
+                    valid_mask[i:i+chunk_size, None].to(self._execution_device) if low_memory_usage else valid_mask[i:i+chunk_size, None], 
+                ], dim=1),
                 latent_dist
             )
             if isinstance(latent_dist, DiagonalGaussianDistribution):
@@ -168,7 +173,19 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         return latents
 
     @torch.no_grad()
-    def decode_point_map(self, point_map_vae, latents, chunk_size=8, force_projection=True, force_fixed_focal=True, use_extract_interp=False, need_resize=False, height=None, width=None):
+    def decode_point_map(
+        self, 
+        point_map_vae, 
+        latents, 
+        chunk_size=8, 
+        force_projection=True, 
+        force_fixed_focal=True, 
+        use_extract_interp=False, 
+        need_resize=False, 
+        height=None, 
+        width=None, 
+        low_memory_usage=False
+    ):
         T = latents.shape[0]
         rec_intrinsic_maps = []
         rec_depth_maps = []
@@ -179,9 +196,9 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
                 lat,           
                 num_frames=lat.shape[0],
             )
-            rec_intrinsic_maps.append(rec_imap)
-            rec_depth_maps.append(rec_dmap)
-            rec_valid_masks.append(rec_vmask)
+            rec_intrinsic_maps.append(rec_imap.cpu() if low_memory_usage else rec_imap)
+            rec_depth_maps.append(rec_dmap.cpu() if low_memory_usage else rec_dmap)
+            rec_valid_masks.append(rec_vmask.cpu() if low_memory_usage else rec_vmask)
         
         rec_intrinsic_maps = torch.cat(rec_intrinsic_maps, dim=0)
         rec_depth_maps = torch.cat(rec_depth_maps, dim=0)
@@ -247,6 +264,7 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         force_fixed_focal: bool = True,
         use_extract_interp: bool = False,
         track_time: bool = False,
+        low_memory_usage: bool = False
     ):
         
         # video: in shape [t, h, w, c] if np.ndarray or [t, c, h, w] if torch.Tensor, in range [0, 1]
@@ -283,6 +301,7 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         self._guidance_scale = guidance_scale
 
         if track_time:
+            print(f'Processing video shape : {list(video.shape)}')
             start_event = torch.cuda.Event(enable_timing=True)
             prior_event = torch.cuda.Event(enable_timing=True)
             encode_event = torch.cuda.Event(enable_timing=True)
@@ -293,8 +312,9 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         # 3. Encode input video
         pred_disparity, pred_valid_mask, pred_point_map, pred_intrinsic_map = self.produce_priors(
             prior_model, 
-            video.to(device=device, dtype=torch.float32),
-            chunk_size=decode_chunk_size
+            video.to(torch.float32) if low_memory_usage else video.to(device=device, dtype=torch.float32),
+            chunk_size=decode_chunk_size,
+            low_memory_usage=low_memory_usage
         ) # T,H,W T,H,W T,3,H,W T,2,H,W
 
         if need_resize:
@@ -325,14 +345,6 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
         video = video * 2.0 - 1.0  # [0,1] -> [-1,1], in [t, c, h, w]
 
         video_embeddings = self.encode_video(video, chunk_size=decode_chunk_size).unsqueeze(0)
-        prior_latents = self.encode_point_map(
-            point_map_vae,
-            pred_disparity, 
-            pred_valid_mask, 
-            pred_point_map, 
-            pred_intrinsic_map, 
-            chunk_size=decode_chunk_size
-        ).unsqueeze(0).to(video_embeddings.dtype) # 1,T,C,H,W
 
         # 4. Encode input image using VAE
 
@@ -348,7 +360,20 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
             chunk_size=decode_chunk_size,
         ).unsqueeze(0).to(video_embeddings.dtype)  # [1, t, c, h, w]
 
-        torch.cuda.empty_cache()
+        if low_memory_usage:
+            del video
+            torch.cuda.empty_cache()
+
+        prior_latents = self.encode_point_map(
+            point_map_vae,
+            pred_disparity, 
+            pred_valid_mask, 
+            pred_point_map, 
+            pred_intrinsic_map, 
+            chunk_size=decode_chunk_size,
+            low_memory_usage=low_memory_usage
+        ).unsqueeze(0).to(video_embeddings.dtype) # 1,T,C,H,W
+        
 
         if track_time:
             encode_event.record()
@@ -498,6 +523,14 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
 
         latents_all = 1 / self.vae.config.scaling_factor * latents_all.squeeze(0).to(torch.float32)
 
+        if low_memory_usage:
+            del latents
+            del prior_latents
+            del latent_model_input
+            del latents_init
+            del noise_pred
+            torch.cuda.empty_cache()
+
         if track_time:
             denoise_event.record()
             torch.cuda.synchronize()
@@ -516,7 +549,9 @@ class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
             use_extract_interp=use_extract_interp, 
             need_resize=need_resize, 
             height=original_height, 
-            width=original_width)
+            width=original_width,
+            low_memory_usage=low_memory_usage 
+        )
         
 
         if track_time:
