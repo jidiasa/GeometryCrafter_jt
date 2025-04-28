@@ -194,7 +194,7 @@ python sfm/vis_points.py \
 - Welcome to open issues and pull requests.
 - Welcome to optimize the inference speed and memory usage, e.g., through model quantization, distillation, or other acceleration techniques.
 
-## Acknowledgement
+## ❤️ Acknowledgement
 
 We have used codes from other great research work, including [DepthCrafter](https://github.com/Tencent/DepthCrafter), [MoGe](https://github.com/microsoft/moge), [SAM2](https://github.com/facebookresearch/sam2), [glue-factory](https://github.com/cvg/glue-factory) and [SpaTracker](https://github.com/henry123-boy/SpaTracker). We sincerely thank the authors for their awesome work!
 
