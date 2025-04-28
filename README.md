@@ -34,6 +34,7 @@ If you find GeometryCrafter useful, **please help ⭐ this repo**, which is impo
 We present GeometryCrafter, a novel approach that estimates temporally consistent, high-quality point maps from open-world videos, facilitating downstream applications such as 3D/4D reconstruction and depth-based video editing or generation.
 
 Release Notes:
+- `[28/04/2025]` 🤗🤗🤗 We release our implemented SfM method for in-the-wild videos, based on [SAM2](https://github.com/facebookresearch/sam2), [glue-factory](https://github.com/cvg/glue-factory) and [SpaTracker](https://github.com/henry123-boy/SpaTracker).
 - `[14/04/2025]` 🚀🚀🚀 We provide a `low_memory_usage` option in pipeline for saving GPU memory usage, thanks to [calledit](https://github.com/calledit)'s helpful suggestion. 
 - `[01/04/2025]` 🔥🔥🔥**GeometryCrafter** is released now, have fun!
 
@@ -134,10 +135,68 @@ Please check the `evaluation` folder.
    (Remember to replace the `pred_data_root_dir` and `gt_data_root_dir` with your path.)
 - We also provide the comparison results of MoGe and the deterministic variant of our method. You can evaluate these methods under the same protocol by uncomment the corresponding lines in `evaluation/run.sh` `evaluation/eval.sh` `evaluation/run_batch.sh` and `evaluation/eval_depth.sh`.
 
+## 📷 Camera Pose Estimation for In-the-wild Videos
+
+Leveraging the temporally consistent point maps output by GeometryCrafter, we implement a camera pose estimation method designed for in-the-wild videos. We hope that our work will serve as a launchpad for 4D reconstruction. Our implementation can be summarized as follows
+- Segment the dynamic objects from the video with [SAM2](https://github.com/facebookresearch/sam2). We refer to a huggingface demo [here](https://huggingface.co/spaces/fffiloni/SAM2-Video-Predictor), thanks to [fffiloni](https://huggingface.co/fffiloni)'s great work.
+- Find a set of feature points in the static background with SIFT and SuperPoint implemented by [glue-factory](https://github.com/cvg/glue-factory) 
+- Track these points with [SpaTracker](https://github.com/henry123-boy/SpaTracker), which takes the monocular video and metric depth maps as input.
+- Use gradient descent to solve the point-set rigid transformation problem (3-DoF rotation and 3-DoF translation), based on the tracking results. More details can be found in our paper.
+
+```bash
+# We provide an example here
+VIDEO_PATH=examples/video7.mp4
+POINT_MAP_PATH=workspace/examples_output/video7.npz
+MASK_PATH=examples/video7_mask.mp4
+TRACK_DIR=workspace/trackers/video7
+SFM_DIR=workspace/sfm/video7
+
+# Download the checkpoints of SpaTracker and Superpoint and put them in the following path
+# - pretrained_models/spaT_final.pth
+# - pretrained_models/superpoint_v6_from_tf.pth
+
+# Here's the urls
+# - SpaTracker: https://drive.google.com/drive/folders/1UtzUJLPhJdUg2XvemXXz1oe6KUQKVjsZ?usp=sharing
+# - SuperPoint: https://github.com/rpautrat/SuperPoint/raw/master/weights/superpoint_v6_from_tf.pth
+
+python sfm/run_track.py \
+    --video_path ${VIDEO_PATH} \
+    --point_map_path ${POINT_MAP_PATH} \
+    --mask_path ${MASK_PATH} \
+    --out_dir ${TRACK_DIR} \
+    --vis_dir ${TRACK_DIR} \
+    --use_ori_res \
+    --spatracker_checkpoint pretrained_models/spaT_final.pth \
+    --superpoint_checkpoint pretrained_models/superpoint_v6_from_tf.pth
+
+python sfm/run.py \
+    --num_iterations 2000 \
+    --video_path ${VIDEO_PATH} \
+    --point_map_path ${POINT_MAP_PATH} \
+    --mask_path ${MASK_PATH} \
+    --track_dir ${TRACK_DIR} \
+    --out_dir ${SFM_DIR} \
+    --use_ori_res
+
+python sfm/vis_points.py \
+    --sfm_dir ${SFM_DIR}
+
+# You'll find the processed dataset used for 4D reconstruction in ${SFM_DIR}
+```
+
+⚠️ Camera pose estimation is **NOT** the primary objective and the core contribution of GeometryCrafter. This simplified application just demonstrates the potential for 4D reconstruction using GeometryCrafter. If you find it useful, **please help ⭐ this repo**. 
+
+⚠️ According to our experiments, it exhibits less robustness in certain cases. Camera pose estimation for dynamic videos remains a challenging problem for researchers.
+
+
 ## 🤝 Contributing
 
 - Welcome to open issues and pull requests.
 - Welcome to optimize the inference speed and memory usage, e.g., through model quantization, distillation, or other acceleration techniques.
+
+## Acknowledgement
+
+We have used codes from other great research work, including [DepthCrafter](https://github.com/Tencent/DepthCrafter), [MoGe](https://github.com/microsoft/moge), [SAM2](https://github.com/facebookresearch/sam2), [glue-factory](https://github.com/cvg/glue-factory) and [SpaTracker](https://github.com/henry123-boy/SpaTracker). We sincerely thank the authors for their awesome work!
 
 ## 📜 Citation
 

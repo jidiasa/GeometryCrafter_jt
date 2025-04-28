@@ -4,3 +4,6 @@
 [submodule "third_party/moge"]
 	path = third_party/moge
 	url = https://github.com/microsoft/MoGe.git
+[submodule "sfm/spatracker"]
+	path = sfm/spatracker
+	url = https://github.com/henry123-boy/SpaTracker
