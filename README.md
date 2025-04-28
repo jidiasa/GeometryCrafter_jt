@@ -178,10 +178,12 @@ python sfm/run.py \
     --out_dir ${SFM_DIR} \
     --use_ori_res
 
+# You'll find the processed dataset used for 4D reconstruction in ${SFM_DIR}
+# Visualize per-frame point maps in the world coordinates
+
 python sfm/vis_points.py \
     --sfm_dir ${SFM_DIR}
 
-# You'll find the processed dataset used for 4D reconstruction in ${SFM_DIR}
 ```
 
 ⚠️ Camera pose estimation is **NOT** the primary objective and the core contribution of GeometryCrafter. This simplified application just demonstrates the potential for 4D reconstruction using GeometryCrafter. If you find it useful, **please help ⭐ this repo**. 
