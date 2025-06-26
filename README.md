@@ -14,6 +14,8 @@ _**[Tian-Xing Xu<sup>1</sup>](https://scholar.google.com/citations?user=zHp0rMIA
 <sup>2</sup>ARC Lab, Tencent PCG
 <sup>3</sup>HKUST
 
+ICCV 2025
+
 ![Version](https://img.shields.io/badge/version-1.0.0-blue) &nbsp;
  <a href='https://arxiv.org/abs/2504.01016'><img src='https://img.shields.io/badge/arXiv-2504.01016-b31b1b.svg'></a> &nbsp;
  <a href='https://geometrycrafter.github.io'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
@@ -34,6 +36,7 @@ If you find GeometryCrafter useful, **please help ⭐ this repo**, which is impo
 We present GeometryCrafter, a novel approach that estimates temporally consistent, high-quality point maps from open-world videos, facilitating downstream applications such as 3D/4D reconstruction and depth-based video editing or generation.
 
 Release Notes:
+- `[26/06/2025]` 🎉🎉🎉 GeometryCrafter is accepted by ICCV 2025.
 - `[28/04/2025]` 🤗🤗🤗 We release our implemented SfM method for in-the-wild videos, based on [SAM2](https://github.com/facebookresearch/sam2), [glue-factory](https://github.com/cvg/glue-factory) and [SpaTracker](https://github.com/henry123-boy/SpaTracker).
 - `[14/04/2025]` 🚀🚀🚀 We provide a `low_memory_usage` option in pipeline for saving GPU memory usage, thanks to [calledit](https://github.com/calledit)'s helpful suggestion. 
 - `[01/04/2025]` 🔥🔥🔥**GeometryCrafter** is released now, have fun!
