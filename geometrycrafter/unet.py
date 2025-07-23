@@ -1,9 +1,14 @@
 from typing import Union, Tuple
 
-import torch
+import jtorch as torch
+import sys
+sys.path.insert(0, "/home/ubuntu/Desktop/GeometryCrafter/geometrycrafter/stable_video_diffusion/diffusers_jittor/src")
+
 from diffusers import UNetSpatioTemporalConditionModel
-from diffusers.models.unets.unet_spatio_temporal_condition import UNetSpatioTemporalConditionOutput
+from diffusers.models.unet_spatio_temporal_condition import UNetSpatioTemporalConditionOutput
 from diffusers.utils import is_torch_version
+import jittor as jt
+from jittor import nn
 
 
 class UNetSpatioTemporalConditionModelVid2vid(
@@ -15,267 +20,100 @@ class UNetSpatioTemporalConditionModelVid2vid(
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
 
-    def forward(
+    def execute(                       # ← Jittor 里 forward ≈ execute
         self,
-        sample: torch.Tensor,
-        timestep: Union[torch.Tensor, float, int],
-        encoder_hidden_states: torch.Tensor,
-        added_time_ids: torch.Tensor,
-        return_dict: bool = True,
-    ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
+        sample                : jt.Var,                       # (B,F,C,H,W)
+        timestep              : Union[jt.Var, float, int],
+        encoder_hidden_states : jt.Var,                       # (B,F,C_hid)
+        added_time_ids        : jt.Var,                       # (B,3)
+        return_dict           : bool = True,
+    ):
+        # ---------- 1) 处理 timestep ----------
+        if not isinstance(timestep, jt.Var):
+            # Jittor 无 MPS；直接按类型选 dtype
+            dtype = jt.float32 if isinstance(timestep, float) else jt.int64
+            timesteps = jt.Var([timestep], dtype=dtype).to(sample.device)
+        else:
+            timesteps = timestep
+            if timesteps.ndim == 0:
+                timesteps = timesteps.reshape(1).to(sample.device)
 
-        # 1. time
-        timesteps = timestep
-        if not torch.is_tensor(timesteps):
-            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
-            # This would be a good case for the `match` statement (Python 3.10+)
-            is_mps = sample.device.type == "mps"
-            if isinstance(timestep, float):
-                dtype = torch.float32 if is_mps else torch.float64
-            else:
-                dtype = torch.int32 if is_mps else torch.int64
-            timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
-        elif len(timesteps.shape) == 0:
-            timesteps = timesteps[None].to(sample.device)
+        B, F = sample.shape[:2]             # batch, frames
+        timesteps = timesteps.broadcast((B,))   # (B,)
 
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        batch_size, num_frames = sample.shape[:2]
-        timesteps = timesteps.expand(batch_size)
+        # ---------- 2) 时间、增强 Embedding ----------
+        t_emb = self.time_proj(timesteps)                # (B,C_t)
+        t_emb = t_emb.cast(self.conv_in.weight.dtype)    # 与权重 dtype 对齐
+        emb   = self.time_embedding(t_emb)               # (B,C)
 
-        t_emb = self.time_proj(timesteps)
+        time_embeds = self.add_time_proj(added_time_ids.flatten())  # (B*3,C')
+        time_embeds = time_embeds.reshape(B, -1).cast(emb.dtype)
+        emb = emb + self.add_embedding(time_embeds)     # (B,C)
 
-        # `Timesteps` does not contain any weights and will always return f32 tensors
-        # but time_embedding might actually be running in fp16. so we need to cast here.
-        # there might be better ways to encapsulate this.
-        t_emb = t_emb.to(dtype=self.conv_in.weight.dtype)
+        # ---------- 3) reshape 维度 ----------
+        sample = sample.reshape(B*F, *sample.shape[2:])           # (B·F,C,H,W)
+        emb    = emb.repeat((F,1))                                # (B·F,C)
+        encoder_hidden_states = encoder_hidden_states.reshape(B*F, 1, -1) # (B·F,1,C_hid)
 
-        emb = self.time_embedding(t_emb)  # [batch_size * num_frames, channels]
-
-        time_embeds = self.add_time_proj(added_time_ids.flatten())
-        time_embeds = time_embeds.reshape((batch_size, -1))
-        time_embeds = time_embeds.to(emb.dtype)
-        aug_emb = self.add_embedding(time_embeds)
-        emb = emb + aug_emb
-
-        # Flatten the batch and frames dimensions
-        # sample: [batch, frames, channels, height, width] -> [batch * frames, channels, height, width]
-        sample = sample.flatten(0, 1)
-        # Repeat the embeddings num_video_frames times
-        # emb: [batch, channels] -> [batch * frames, channels]
-        emb = emb.repeat_interleave(num_frames, dim=0)
-        # encoder_hidden_states: [batch, frames, channels] -> [batch * frames, 1, channels]
-        encoder_hidden_states = encoder_hidden_states.flatten(0, 1).unsqueeze(1)
-
-        # 2. pre-process
-        sample = sample.to(dtype=self.conv_in.weight.dtype)
-        assert sample.dtype == self.conv_in.weight.dtype, (
-            f"sample.dtype: {sample.dtype}, "
-            f"self.conv_in.weight.dtype: {self.conv_in.weight.dtype}"
-        )
+        # ---------- 4) pre-process ----------
+        sample = sample.cast(self.conv_in.weight.dtype)
         sample = self.conv_in(sample)
 
-        image_only_indicator = torch.zeros(
-            batch_size, num_frames, dtype=sample.dtype, device=sample.device
-        )
+        image_only_indicator = jt.zeros((B, F), dtype=sample.dtype, device=sample.device)
 
         down_block_res_samples = (sample,)
 
-        if self.training and self.gradient_checkpointing:
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    return module(*inputs)
+        # ---------- 5) 主干网络 ----------
+        # if self.training and getattr(self, "gradient_checkpointing", False):
 
-                return custom_forward
+        #     def _ckpt(mod, *args):
+        #         # Jittor 的 checkpoint 调用：
+        #         #   jt.misc.checkpoint.checkpoint(fn, *inputs)
+        #         from jittor.misc.checkpoint import checkpoint
+        #         return checkpoint(lambda *i: mod(*i), *args)
 
-            if is_torch_version(">=", "1.11.0"):
+        #     for blk in self.down_blocks:
+        #         if getattr(blk, "has_cross_attention", False):
+        #             sample, res = _ckpt(blk, sample, emb, encoder_hidden_states, image_only_indicator)
+        #         else:
+        #             sample, res = _ckpt(blk, sample, emb, image_only_indicator)
+        #         down_block_res_samples += res
 
-                for downsample_block in self.down_blocks:
-                    if (
-                        hasattr(downsample_block, "has_cross_attention")
-                        and downsample_block.has_cross_attention
-                    ):
-                        sample, res_samples = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(downsample_block),
-                            sample,
-                            emb,
-                            encoder_hidden_states,
-                            image_only_indicator,
-                            use_reentrant=False,
-                        )
-                    else:
-                        sample, res_samples = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(downsample_block),
-                            sample,
-                            emb,
-                            image_only_indicator,
-                            use_reentrant=False,
-                        )
-                    down_block_res_samples += res_samples
+        #     sample = _ckpt(self.mid_block, sample, emb, encoder_hidden_states, image_only_indicator)
 
-                # 4. mid
-                sample = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(self.mid_block),
-                    sample,
-                    emb,
-                    encoder_hidden_states,
-                    image_only_indicator,
-                    use_reentrant=False,
-                )
+        #     for blk in self.up_blocks:
+        #         res = down_block_res_samples[-len(blk.resnets):]
+        #         down_block_res_samples = down_block_res_samples[:-len(blk.resnets)]
+        #         if getattr(blk, "has_cross_attention", False):
+        #             sample = _ckpt(blk, sample, res, emb, encoder_hidden_states, image_only_indicator)
+        #         else:
+        #             sample = _ckpt(blk, sample, res, emb, image_only_indicator)
 
-                # 5. up
-                for i, upsample_block in enumerate(self.up_blocks):
-                    res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-                    down_block_res_samples = down_block_res_samples[
-                        : -len(upsample_block.resnets)
-                    ]
-
-                    if (
-                        hasattr(upsample_block, "has_cross_attention")
-                        and upsample_block.has_cross_attention
-                    ):
-                        sample = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(upsample_block),
-                            sample,
-                            res_samples,
-                            emb,
-                            encoder_hidden_states,
-                            image_only_indicator,
-                            use_reentrant=False,
-                        )
-                    else:
-                        sample = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(upsample_block),
-                            sample,
-                            res_samples,
-                            emb,
-                            image_only_indicator,
-                            use_reentrant=False,
-                        )
+        for blk in self.down_blocks:
+            if getattr(blk, "has_cross_attention", False):
+                sample, res = blk(sample, emb, encoder_hidden_states, image_only_indicator)
             else:
+                sample, res = blk(sample, emb, image_only_indicator)
+            down_block_res_samples += res
 
-                for downsample_block in self.down_blocks:
-                    if (
-                        hasattr(downsample_block, "has_cross_attention")
-                        and downsample_block.has_cross_attention
-                    ):
-                        sample, res_samples = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(downsample_block),
-                            sample,
-                            emb,
-                            encoder_hidden_states,
-                            image_only_indicator,
-                        )
-                    else:
-                        sample, res_samples = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(downsample_block),
-                            sample,
-                            emb,
-                            image_only_indicator,
-                        )
-                    down_block_res_samples += res_samples
+        sample = self.mid_block(sample, emb, encoder_hidden_states, image_only_indicator)
 
-                # 4. mid
-                sample = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(self.mid_block),
-                    sample,
-                    emb,
-                    encoder_hidden_states,
-                    image_only_indicator,
-                )
+        for blk in self.up_blocks:
+            res = down_block_res_samples[-len(blk.resnets):]
+            down_block_res_samples = down_block_res_samples[:-len(blk.resnets)]
+            if getattr(blk, "has_cross_attention", False):
+                sample = blk(sample, res, emb, encoder_hidden_states, image_only_indicator)
+            else:
+                sample = blk(sample, res, emb, image_only_indicator)
 
-                # 5. up
-                for i, upsample_block in enumerate(self.up_blocks):
-                    res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-                    down_block_res_samples = down_block_res_samples[
-                        : -len(upsample_block.resnets)
-                    ]
-
-                    if (
-                        hasattr(upsample_block, "has_cross_attention")
-                        and upsample_block.has_cross_attention
-                    ):
-                        sample = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(upsample_block),
-                            sample,
-                            res_samples,
-                            emb,
-                            encoder_hidden_states,
-                            image_only_indicator,
-                        )
-                    else:
-                        sample = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(upsample_block),
-                            sample,
-                            res_samples,
-                            emb,
-                            image_only_indicator,
-                        )
-
-        else:
-            for downsample_block in self.down_blocks:
-                if (
-                    hasattr(downsample_block, "has_cross_attention")
-                    and downsample_block.has_cross_attention
-                ):
-                    sample, res_samples = downsample_block(
-                        hidden_states=sample,
-                        temb=emb,
-                        encoder_hidden_states=encoder_hidden_states,
-                        image_only_indicator=image_only_indicator,
-                    )
-
-                else:
-                    sample, res_samples = downsample_block(
-                        hidden_states=sample,
-                        temb=emb,
-                        image_only_indicator=image_only_indicator,
-                    )
-
-                down_block_res_samples += res_samples
-
-            # 4. mid
-            sample = self.mid_block(
-                hidden_states=sample,
-                temb=emb,
-                encoder_hidden_states=encoder_hidden_states,
-                image_only_indicator=image_only_indicator,
-            )
-
-            # 5. up
-            for i, upsample_block in enumerate(self.up_blocks):
-                res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-                down_block_res_samples = down_block_res_samples[
-                    : -len(upsample_block.resnets)
-                ]
-
-                if (
-                    hasattr(upsample_block, "has_cross_attention")
-                    and upsample_block.has_cross_attention
-                ):
-                    sample = upsample_block(
-                        hidden_states=sample,
-                        res_hidden_states_tuple=res_samples,
-                        temb=emb,
-                        encoder_hidden_states=encoder_hidden_states,
-                        image_only_indicator=image_only_indicator,
-                    )
-                else:
-                    sample = upsample_block(
-                        hidden_states=sample,
-                        res_hidden_states_tuple=res_samples,
-                        temb=emb,
-                        image_only_indicator=image_only_indicator,
-                    )
-
-        # 6. post-process
+        # ---------- 6) post-process ----------
         sample = self.conv_norm_out(sample)
         sample = self.conv_act(sample)
         sample = self.conv_out(sample)
 
-        # 7. Reshape back to original shape
-        sample = sample.reshape(batch_size, num_frames, *sample.shape[1:])
+        # ---------- 7) 还原维度 ----------
+        sample = sample.reshape(B, F, *sample.shape[1:])     # (B,F,C,H,W)
 
         if not return_dict:
             return (sample,)
-
-        return UNetSpatioTemporalConditionOutput(sample=sample)
+        return dict(sample=sample)
