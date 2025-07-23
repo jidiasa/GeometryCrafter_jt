@@ -1,568 +1,616 @@
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union, Tuple
 import gc
 
 import numpy as np
-import torch
-import torch.nn.functional as F
+import jittor as jt
+import jittor.nn as nn
+import sys
+
 
 from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion import (
     _resize_with_antialiasing,
-    StableVideoDiffusionPipeline,
-    retrieve_timesteps,
+    StableVideoDiffusionPipeline
 )
 from diffusers.utils import logging
-from kornia.utils import create_meshgrid
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 
+import numpy as np, gc, time
+from typing import Union, Optional, Callable, Dict, List
+from jittor import Var
+import inspect
+
+import base64, io, json, subprocess
+from PIL import Image
+import numpy as np
+import jittor as jt
+
+import json, base64, subprocess, os, sys, tempfile, numpy as np, torch
+
+_CHUNK_MAGIC = "__npy__"         
+_ENV_NAME    = "geocrafter_torch" 
+_WORKER_PY   = os.path.join(os.path.dirname(__file__), "moge_worker.py")
+
+def _start_worker():
+    return subprocess.Popen(
+        ["conda", "run", "-n", _ENV_NAME, "python", _WORKER_PY],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        bufsize=0  # 行／块全都立即 flush
+    )
+
+def _serialize_ndarray(arr: np.ndarray) -> str:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".npy") as f:
+        np.save(f, arr)
+        path = f.name
+    return path
+
+def _deserialize_from_path(path: str):
+    arr = np.load(path, allow_pickle=False)
+    os.remove(path)
+    return arr
+
+def call_prior(chunk: torch.Tensor):
+    if chunk.device.type != "cpu":
+        chunk = chunk.cpu()
+    tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=".npy")
+    np.save(tmp_in, chunk.numpy().astype(np.float32))
+    tmp_in.close()
+
+    cmd = [
+        "conda", "run", "-n", "geocrafter_torch",
+        "python", "moge_worker.py", tmp_in.name
+    ]
+    out = subprocess.check_output(cmd, text=True)        
+    reply = json.loads(out)
+
+    pred_p = np.load(reply["p"]); os.remove(reply["p"])
+    pred_m = np.load(reply["m"]); os.remove(reply["m"])
+    os.remove(tmp_in.name)                                
+
+    return pred_p, pred_m
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
-@torch.no_grad()
+def _to_device(x: Var, device: Optional[str]) -> Var:
+    if device is None:
+        return x
+    target_gpu = str(device).startswith("cuda")
+    if target_gpu and not x.is_cuda():
+        return x.cuda()
+    if not target_gpu and x.is_cuda():
+        return x.cpu()
+    return x
+
+def retrieve_timesteps(
+    scheduler = None,          
+    num_inference_steps: Optional[int] = None,
+    device = None,
+    timesteps: Optional[List[int]] = None,
+    sigmas: Optional[List[float]] = None,
+    **kwargs,
+) -> Tuple[Var, int]:
+    
+    if timesteps is not None:
+        if "timesteps" not in inspect.signature(scheduler.set_timesteps).parameters:
+            raise ValueError(
+                f"{scheduler.__class__.__name__} 不支持手动指定 timesteps。"
+            )
+        scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
+        timesteps_var = scheduler.timesteps
+        resolved_steps = len(timesteps_var)
+
+    elif sigmas is not None:
+        if "sigmas" not in inspect.signature(scheduler.set_timesteps).parameters:
+            raise ValueError(
+                f"{scheduler.__class__.__name__} 不支持手动指定 sigmas。"
+            )
+        scheduler.set_timesteps(sigmas=sigmas, device=device, **kwargs)
+        timesteps_var = scheduler.timesteps
+        resolved_steps = len(timesteps_var)
+
+    else:
+        scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
+        timesteps_var = scheduler.timesteps
+        resolved_steps = num_inference_steps
+    if device is not None:
+        timesteps_var = _to_device(timesteps_var, device)
+
+    return timesteps_var, resolved_steps
+
+def create_meshgrid(height, width, normalized=True, dtype="float32"):
+    y, x = jt.meshgrid([
+        jt.linspace(-1, 1, height) if normalized else jt.arange(height),
+        jt.linspace(-1, 1, width) if normalized else jt.arange(width),
+    ])
+    return jt.stack([x, y], dim=-1)  # [h, w, 2]
+
+@jt.no_grad()
 def normalize_point_map(point_map, valid_mask):
-    # T,H,W,3 T,H,W
     norm_factor = (point_map[..., 2] * valid_mask.float()).mean() / (valid_mask.float().mean() + 1e-8)
-    norm_factor = norm_factor.clip(min=1e-3)
+    norm_factor = jt.maximum(norm_factor, 1e-3)
     return point_map / norm_factor
 
+@jt.no_grad()
 def point_map_xy2intrinsic_map(point_map_xy):
-    # *,h,w,2
+    # point_map_xy: [..., h, w, 2]
     height, width = point_map_xy.shape[-3], point_map_xy.shape[-2]
-    assert height % 2 == 0
-    assert width % 2 == 0
-    mesh_grid = create_meshgrid(
-        height=height,
-        width=width,
-        normalized_coordinates=True,
-        device=point_map_xy.device,
-        dtype=point_map_xy.dtype
-    )[0] # h,w,2
-    assert mesh_grid.abs().min() > 1e-4
-    # *,h,w,2
-    mesh_grid = mesh_grid.expand_as(point_map_xy)
-    nc = point_map_xy.mean(dim=-2).mean(dim=-2) # *, 2
-    nc_map = nc[..., None, None, :].expand_as(point_map_xy)
-    nf = ((point_map_xy - nc_map) / mesh_grid).mean(dim=-2).mean(dim=-2)
-    nf_map = nf[..., None, None, :].expand_as(point_map_xy)
-    # print((mesh_grid * nf_map + nc_map - point_map_xy).abs().max())
+    assert height % 2 == 0 and width % 2 == 0
 
-    return torch.cat([nc_map, nf_map], dim=-1)
+    mesh_grid = create_meshgrid(height, width, normalized=True, dtype=point_map_xy.dtype)
+    mesh_grid = mesh_grid.expand(*point_map_xy.shape[:-3], height, width, 2)
+
+    nc = point_map_xy.mean(dim=-3).mean(dim=-2)  # [..., 2]
+    nc_map = nc.unsqueeze(-2).unsqueeze(-2).expand_as(point_map_xy)
+
+    nf = ((point_map_xy - nc_map) / mesh_grid).mean(dim=-3).mean(dim=-2)  # [..., 2]
+    nf_map = nf.unsqueeze(-2).unsqueeze(-2).expand_as(point_map_xy)
+
+    return jt.concat([nc_map, nf_map], dim=-1)
 
 def robust_min_max(tensor, quantile=0.99):
+
     T, H, W = tensor.shape
     min_vals = []
     max_vals = []
+
     for i in range(T):
-        min_vals.append(torch.quantile(tensor[i], q=1-quantile, interpolation='nearest').item())
-        max_vals.append(torch.quantile(tensor[i], q=quantile, interpolation='nearest').item())
-    return min(min_vals), max(max_vals) 
+        flat = tensor[i].reshape(-1)
+        flat_sorted = jt.sort(flat)
+        n = flat.numel()
 
-class GeometryCrafterDiffPipeline(StableVideoDiffusionPipeline):
+        low_idx = int((1 - quantile) * n)
+        high_idx = int(quantile * n)
+        
+        min_vals.append(flat_sorted[low_idx].item())
+        max_vals.append(flat_sorted[high_idx].item())
 
-    @torch.inference_mode()
-    def encode_video(
-        self,
-        video: torch.Tensor,
-        chunk_size: int = 14,
-    ) -> torch.Tensor:
-        """
-        :param video: [b, c, h, w] in range [-1, 1], the b may contain multiple videos or frames
-        :param chunk_size: the chunk size to encode video
-        :return: image_embeddings in shape of [b, 1024]
-        """
+    return min(min_vals), max(max_vals)
 
-        video_224 = _resize_with_antialiasing(video.float(), (224, 224))
-        video_224 = (video_224 + 1.0) / 2.0  # [-1, 1] -> [0, 1]
-        embeddings = []
-        for i in range(0, video_224.shape[0], chunk_size):
+class GeometryCrafterDiffPipeline_jt(StableVideoDiffusionPipeline):
+
+    @jt.no_grad()
+    def encode_video(self, video: jt.Var, chunk_size: int = 14):
+       
+        vid_224 = _resize_with_antialiasing(video.float32(), (224, 224))
+        vid_224 = (vid_224 + 1.0) / 2.0  # → [0, 1]
+        embeds = []
+        for i in range(0, vid_224.shape[0], chunk_size):
             emb = self.feature_extractor(
-                images=video_224[i : i + chunk_size],
+                images=vid_224[i : i + chunk_size],
                 do_normalize=True,
                 do_center_crop=False,
                 do_resize=False,
                 do_rescale=False,
-                return_tensors="pt",
-            ).pixel_values.to(video.device, dtype=video.dtype)
-            embeddings.append(self.image_encoder(emb).image_embeds)  # [b, 1024]
+                return_tensors="pt",  # Torch tensor expected by CLIP
+            ).pixel_values
+            # Convert to Jittor and keep dtype
+            emb_jt = jt.contrib.torch_converter.torch2jt(emb).to(video.dtype)
+            embeds.append(self.image_encoder(emb_jt).image_embeds)
+        return jt.concat(embeds, dim=0)
 
-        embeddings = torch.cat(embeddings, dim=0)  # [t, 1024]
-        return embeddings
-
-    @torch.inference_mode()
-    def encode_vae_video(
-        self,
-        video: torch.Tensor,
-        chunk_size: int = 14,
-    ):
-        """
-        :param video: [b, c, h, w] in range [-1, 1], the b may contain multiple videos or frames
-        :param chunk_size: the chunk size to encode video
-        :return: vae latents in shape of [b, c, h, w]
-        """
-        video_latents = []
-        for i in range(0, video.shape[0], chunk_size):
-            video_latents.append(
-                self.vae.encode(video[i : i + chunk_size]).latent_dist.mode()
-            )
-        video_latents = torch.cat(video_latents, dim=0)
-        return video_latents
-    
-    @torch.inference_mode()
-    def produce_priors(self, prior_model, frame, chunk_size=8, low_memory_usage=False):
-        T, _, H, W = frame.shape 
-        # frame = (frame + 1) / 2
-        pred_point_maps = []
-        pred_masks = []
+    @jt.no_grad()
+    def produce_priors(self, prior_model, frame: jt.Var, *, chunk_size: int = 8, low_memory_usage: bool = False):
+        """Run monocular prior network to get disparity/mask/point/intrinsic maps."""
+        preds_p, preds_m = [], []
         for i in range(0, len(frame), chunk_size):
-            pred_p, pred_m = prior_model.forward_image(
-                frame[i:i+chunk_size].to(self._execution_device) if low_memory_usage else frame[i:i+chunk_size]
-            )
-            pred_point_maps.append(pred_p.cpu() if low_memory_usage else pred_p)
-            pred_masks.append(pred_m.cpu() if low_memory_usage else pred_m)
-        pred_point_maps = torch.cat(pred_point_maps, dim=0)
-        pred_masks = torch.cat(pred_masks, dim=0)
-        
-        pred_masks = pred_masks.float() * 2 - 1
-        
-        # T,H,W,3 T,H,W
+            # Prior network is PyTorch‑based → convert
+            torch_in = jt.contrib.torch_converter.jt2torch(frame[i : i + chunk_size])
+            p_t, m_t = prior_model.forward_image(torch_in)
+            preds_p.append(jt.contrib.torch_converter.torch2jt(p_t))
+            preds_m.append(jt.contrib.torch_converter.torch2jt(m_t))
+        pred_point = jt.concat(preds_p, dim=0)
+        pred_mask = jt.concat(preds_m, dim=0)
+
+        pred_mask = pred_mask.float32() * 2 - 1
+        pred_point = self._normalize_point_map(pred_point, pred_mask > 0)
+
+        pred_disp = 1.0 / jt.maximum(pred_point[..., 2], 1e-3)
+        pred_disp = pred_disp * (pred_mask > 0)
+        min_d, max_d = robust_min_max(pred_disp)
+        pred_disp = (pred_disp - min_d) / (max_d - min_d + 1e-4)
+        pred_disp = jt.clamp(pred_disp, 0, 1) * 2 - 1
+
+        pred_point[..., :2] = pred_point[..., :2] / (pred_point[..., 2:3] + 1e-7)
+        pred_point[..., 2] = jt.log(pred_point[..., 2] + 1e-7) * (pred_mask > 0)
+        pred_intr = self._point_map_xy2intrinsic(pred_point[..., :2]).permute(0, 3, 1, 2)
+        pred_point = pred_point.permute(0, 3, 1, 2)
+        return pred_disp, pred_mask, pred_point, pred_intr
+    
+    @jt.no_grad()
+    def encode_vae_video(self, video: jt.Var, chunk_size: int = 14):
+        """VAE encode video to latent space (T, C, H, W)."""
+        lat = []
+        for i in range(0, video.shape[0], chunk_size):
+            frame = video[i : i + chunk_size]
+            # Convert to Torch for diffusers' VAE
+            lat_torch = self.vae.encode(jt.contrib.torch_converter.jt2torch(frame)).latent_dist.mode()
+            lat.append(jt.contrib.torch_converter.torch2jt(lat_torch))
+        return jt.concat(lat, dim=0)
+    
+    @jt.no_grad()
+    def produce_priors(self, prior_model, frame: jt.Var, *, chunk_size: int = 8, low_memory_usage: bool = False):
+        """Run monocular prior network to get disparity/mask/point/intrinsic maps."""
+        T, _, H, W = frame.shape
+        pred_point_maps, pred_masks = [], []
+
+        if not hasattr(self, "_torch_worker"):
+            self._torch_worker = _start_worker()
+
+        worker = self._torch_worker
+
+        for i in range(0, T, chunk_size):
+            chunk = frame[i:i+chunk_size]
+            if low_memory_usage:
+                chunk = chunk.to(self._execution_device)      # e.g. CPU
+            pred_p, pred_m = call_prior(chunk)
+
+            pred_point_maps.append(pred_p)
+            pred_masks.append(pred_m)
+
+        if hasattr(self, "_torch_worker"):
+            self._torch_worker.stdin.close()
+            self._torch_worker.terminate()
+            del self._torch_worker
+
+        pred_point_maps = jt.array(np.concatenate(pred_point_maps, axis=0))
+        pred_masks      = jt.array(np.concatenate(pred_masks,      axis=0))
+
+        pred_masks = pred_masks.cast(jt.float32) * 2 - 1
+
         pred_point_maps = normalize_point_map(pred_point_maps, pred_masks > 0)
 
-        pred_disps = 1.0 / pred_point_maps[..., 2].clamp_min(1e-3)
-        pred_disps = pred_disps * (pred_masks > 0)
-        min_disparity, max_disparity = robust_min_max(pred_disps)
-        pred_disps = ((pred_disps - min_disparity) / (max_disparity - min_disparity+1e-4)).clamp(0, 1)
-        pred_disps = pred_disps * 2 - 1
+        # disparity = 1/z
+        depth          = jt.maximum(pred_point_maps[..., 2], 1e-3)
+        pred_disps     = 1.0 / depth
+        pred_disps    *= (pred_masks > 0)
+
+        min_disp, max_disp = robust_min_max(pred_disps)
+        pred_disps = (pred_disps - min_disp) / (max_disp - min_disp + 1e-4)
+        pred_disps = jt.clamp(pred_disps, 0.0, 1.0) * 2 - 1 
 
         pred_point_maps[..., :2] = pred_point_maps[..., :2] / (pred_point_maps[..., 2:3] + 1e-7)
-        pred_point_maps[..., 2] = torch.log(pred_point_maps[..., 2] + 1e-7) * (pred_masks > 0) # [x/z, y/z, log(z)]
+        pred_point_maps[...,  2] = jt.log(pred_point_maps[..., 2] + 1e-7) * (pred_masks > 0)
+        pred_intr_maps = point_map_xy2intrinsic_map(pred_point_maps[..., :2]).permute(0, 3, 1, 2)
+        pred_point_maps = pred_point_maps.permute(0, 3, 1, 2)
 
-        pred_intr_maps = point_map_xy2intrinsic_map(pred_point_maps[..., :2]).permute(0,3,1,2) # T,H,W,2      
-        pred_point_maps = pred_point_maps.permute(0,3,1,2)
-        
         return pred_disps, pred_masks, pred_point_maps, pred_intr_maps
     
-    @torch.inference_mode()
-    def encode_point_map(self, point_map_vae, disparity, valid_mask, point_map, intrinsic_map, chunk_size=8, low_memory_usage=False):
+    @jt.no_grad()         
+    def encode_point_map(self,
+                            point_map_vae,           
+                            disparity,                # (T,H,W)
+                            valid_mask,               # (T,H,W)
+                            point_map,                # (T,3,H,W)
+                            intrinsic_map,            # (T,4,H,W)——和原逻辑保持一致
+                            chunk_size: int = 8,
+                            low_memory_usage: bool = False):
         T, _, H, W = point_map.shape
         latents = []
 
-        psedo_image = disparity[:, None].repeat(1,3,1,1)
-        intrinsic_map = torch.norm(intrinsic_map[:, 2:4], p=2, dim=1, keepdim=False)
+        psedo_image = disparity[:, None].repeat(1, 3, 1, 1)
+
+        intrinsic_map = jt.norm(intrinsic_map[:, 2:4], p=2, dim=1, keepdim=False)
 
         for i in range(0, T, chunk_size):
-            latent_dist = self.vae.encode(
-                psedo_image[i : i + chunk_size].to(dtype=self.vae.dtype, device=self._execution_device) if low_memory_usage else psedo_image[i : i + chunk_size].to(self.vae.dtype)
-            ).latent_dist
-            latent_dist = point_map_vae.encode(                
-                torch.cat([
-                    intrinsic_map[i:i+chunk_size, None].to(self._execution_device) if low_memory_usage else intrinsic_map[i:i+chunk_size, None],
-                    point_map[i:i+chunk_size, 2:3].to(self._execution_device) if low_memory_usage else point_map[i:i+chunk_size, 2:3], 
-                    disparity[i:i+chunk_size, None].to(self._execution_device) if low_memory_usage else disparity[i:i+chunk_size, None], 
-                    valid_mask[i:i+chunk_size, None].to(self._execution_device) if low_memory_usage else valid_mask[i:i+chunk_size, None], 
-                ], dim=1),
-                latent_dist
-            )
-            if isinstance(latent_dist, DiagonalGaussianDistribution):
+            if low_memory_usage:
+                chunk_img = chunk_img.to(self._execution_device)
+            chunk_img = chunk_img.to(self.vae.dtype)
+            latent_dist = self.vae.encode(chunk_img).latent_dist  
+            concat_in = jt.concat([
+                intrinsic_map[i : i + chunk_size, None].to(self._execution_device) if low_memory_usage else intrinsic_map[i : i + chunk_size, None],
+                point_map   [i : i + chunk_size, 2:3].to(self._execution_device)    if low_memory_usage else point_map   [i : i + chunk_size, 2:3],
+                disparity   [i : i + chunk_size, None].to(self._execution_device)   if low_memory_usage else disparity   [i : i + chunk_size, None],
+                valid_mask  [i : i + chunk_size, None].to(self._execution_device)   if low_memory_usage else valid_mask  [i : i + chunk_size, None],
+            ], dim=1)
+
+            latent_dist = point_map_vae.encode(concat_in, latent_dist)
+            if DiagonalGaussianDistribution is not None and isinstance(latent_dist, DiagonalGaussianDistribution):
                 latent = latent_dist.mode()
             else:
                 latent = latent_dist
-            
-            assert isinstance(latent, torch.Tensor)    
+
+            assert isinstance(latent, jt.Var)
             latents.append(latent)
-        latents = torch.cat(latents, dim=0)
+        latents = jt.concat(latents, dim=0)
         latents = latents * self.vae.config.scaling_factor
         return latents
 
-    @torch.no_grad()
+    @jt.no_grad()                   
     def decode_point_map(
-        self, 
+        self,                       
         point_map_vae, 
         latents, 
-        chunk_size=8, 
-        force_projection=True, 
-        force_fixed_focal=True, 
-        use_extract_interp=False, 
-        need_resize=False, 
-        height=None, 
-        width=None, 
-        low_memory_usage=False
-    ):
-        T = latents.shape[0]
-        rec_intrinsic_maps = []
-        rec_depth_maps = []
-        rec_valid_masks = []
-        for i in range(0, T, chunk_size):
-            lat = latents[i:i+chunk_size] 
-            rec_imap, rec_dmap, rec_vmask = point_map_vae.decode(  
-                lat,           
-                num_frames=lat.shape[0],
-            )
-            rec_intrinsic_maps.append(rec_imap.cpu() if low_memory_usage else rec_imap)
-            rec_depth_maps.append(rec_dmap.cpu() if low_memory_usage else rec_dmap)
-            rec_valid_masks.append(rec_vmask.cpu() if low_memory_usage else rec_vmask)
-        
-        rec_intrinsic_maps = torch.cat(rec_intrinsic_maps, dim=0)
-        rec_depth_maps = torch.cat(rec_depth_maps, dim=0)
-        rec_valid_masks = torch.cat(rec_valid_masks, dim=0)
-        
-        if need_resize:
-            # transform the log-depth to depth domain for bilinear interpolation
-            rec_depth_maps = F.interpolate(rec_depth_maps, (height, width), mode='nearest-exact') if use_extract_interp else \
-                F.interpolate(rec_depth_maps.clamp_max(10).exp(), (height, width), mode='bilinear', align_corners=False).log()
-            rec_valid_masks = F.interpolate(rec_valid_masks, (height, width), mode='nearest-exact') if use_extract_interp else \
-                F.interpolate(rec_valid_masks, (height, width), mode='bilinear', align_corners=False)
-            rec_intrinsic_maps = F.interpolate(rec_intrinsic_maps, (height, width), mode='bilinear', align_corners=False)
-
-        H, W = rec_intrinsic_maps.shape[-2], rec_intrinsic_maps.shape[-1]
-        mesh_grid = create_meshgrid(
-            H, W, 
-            normalized_coordinates=True
-        ).to(rec_intrinsic_maps.device, rec_intrinsic_maps.dtype, non_blocking=True)
-        # 1,h,w,2
-        rec_intrinsic_maps = torch.cat([rec_intrinsic_maps * W / np.sqrt(W**2+H**2), rec_intrinsic_maps * H / np.sqrt(W**2+H**2)], dim=1) # t,2,h,w
-        mesh_grid = mesh_grid.permute(0,3,1,2)
-        rec_valid_masks = rec_valid_masks.squeeze(1) > 0
-
-        if force_projection:
-            if force_fixed_focal:
-                nfx = (rec_intrinsic_maps[:, 0, :, :] * rec_valid_masks.float()).mean() / (rec_valid_masks.float().mean() + 1e-4) 
-                nfy = (rec_intrinsic_maps[:, 1, :, :] * rec_valid_masks.float()).mean() / (rec_valid_masks.float().mean() + 1e-4) 
-                rec_intrinsic_maps = torch.tensor([nfx, nfy], device=rec_intrinsic_maps.device)[None, :, None, None].repeat(T, 1, 1, 1)    
-            else:
-                nfx = (rec_intrinsic_maps[:, 0, :, :] * rec_valid_masks.float()).mean(dim=[-1, -2]) / (rec_valid_masks.float().mean(dim=[-1, -2]) + 1e-4) 
-                nfy = (rec_intrinsic_maps[:, 1, :, :] * rec_valid_masks.float()).mean(dim=[-1, -2]) / (rec_valid_masks.float().mean(dim=[-1, -2]) + 1e-4) 
-                rec_intrinsic_maps = torch.stack([nfx, nfy], dim=-1)[:, :, None, None]
-                # t,2,1,1
-
-        rec_point_maps = torch.cat([rec_intrinsic_maps * mesh_grid, rec_depth_maps], dim=1).permute(0,2,3,1)
-        xy, z = rec_point_maps.split([2, 1], dim=-1)
-        z = torch.clamp_max(z, 10) # for numerical stability
-        z = torch.exp(z)
-        rec_point_maps = torch.cat([xy * z, z], dim=-1)
-
-        return rec_point_maps, rec_valid_masks
-
-
-    @torch.no_grad()
-    def __call__(
-        self,
-        video: Union[np.ndarray, torch.Tensor],
-        point_map_vae,
-        prior_model,
-        height: int = 576,
-        width: int = 1024,
-        num_inference_steps: int = 5,
-        guidance_scale: float = 1.0,
-        window_size: Optional[int] = 14,
-        noise_aug_strength: float = 0.02,
-        decode_chunk_size: Optional[int] = None,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
-        callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
-        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        overlap: int = 4,
+        chunk_size: int      = 8,
         force_projection: bool = True,
         force_fixed_focal: bool = True,
         use_extract_interp: bool = False,
-        track_time: bool = False,
+        need_resize: bool   = False,
+        height = None,
+        width = None,
         low_memory_usage: bool = False
     ):
-        
-        # video: in shape [t, h, w, c] if np.ndarray or [t, c, h, w] if torch.Tensor, in range [0, 1]
-        
-        # 0. Default height and width to unet
+        T = latents.shape[0]
+        rec_intrinsic_maps, rec_depth_maps, rec_valid_masks = [], [], []
+
+        for i in range(0, T, chunk_size):
+            lat = latents[i : i + chunk_size]
+            rec_imap, rec_dmap, rec_vmask = point_map_vae.decode(
+                lat,
+                num_frames = lat.shape[0],
+            )
+            if low_memory_usage:          
+                rec_imap  = rec_imap.to('cpu')
+                rec_dmap  = rec_dmap.to('cpu')
+                rec_vmask = rec_vmask.to('cpu')
+
+            rec_intrinsic_maps.append(rec_imap)
+            rec_depth_maps    .append(rec_dmap)
+            rec_valid_masks   .append(rec_vmask)
+
+        rec_intrinsic_maps = jt.concat(rec_intrinsic_maps, dim=0)
+        rec_depth_maps     = jt.concat(rec_depth_maps,     dim=0)
+        rec_valid_masks    = jt.concat(rec_valid_masks,    dim=0)
+
+        if need_resize:
+            size = (height, width)
+            if use_extract_interp:                             
+                rec_depth_maps  = nn.interpolate(rec_depth_maps,  size=size, mode='nearest')
+                rec_valid_masks = nn.interpolate(rec_valid_masks, size=size, mode='nearest')
+            else:
+                rec_depth_maps  = jt.log(
+                    nn.interpolate(
+                        jt.exp(jt.minimum(rec_depth_maps, 10.0)),
+                        size=size, mode='bilinear', align_corners=False
+                    )
+                )
+                rec_valid_masks = nn.interpolate(rec_valid_masks, size=size, mode='bilinear', align_corners=False)
+
+            rec_intrinsic_maps = nn.interpolate(
+                rec_intrinsic_maps, size=size, mode='bilinear', align_corners=False
+            )
+        H, W = rec_intrinsic_maps.shape[-2], rec_intrinsic_maps.shape[-1]
+
+        grid_y, grid_x = jt.meshgrid(jt.linspace(-1, 1, H), jt.linspace(-1, 1, W))
+        mesh_grid = jt.stack([grid_x, grid_y], dim=-1)[None]        
+        mesh_grid = mesh_grid.permute(0, 3, 1, 2).to(               
+            rec_intrinsic_maps.device, rec_intrinsic_maps.dtype
+        )
+
+        factor = jt.sqrt(W * W + H * H)
+        rec_intrinsic_maps = jt.concat(
+            [
+                rec_intrinsic_maps * W / factor,    # fx'
+                rec_intrinsic_maps * H / factor     # fy'
+            ], dim=1
+        )   # (T,2,H,W)
+
+        rec_valid_masks = (rec_valid_masks.squeeze(1) > 0)          
+        if force_projection:
+            vm_float = rec_valid_masks.cast(jt.float32)
+            if force_fixed_focal:
+                nfx = (rec_intrinsic_maps[:, 0] * vm_float).mean() / (vm_float.mean() + 1e-4)
+                nfy = (rec_intrinsic_maps[:, 1] * vm_float).mean() / (vm_float.mean() + 1e-4)
+                rec_intrinsic_maps = jt.stack([nfx, nfy])[None, :, None, None].repeat(T, 1, 1, 1)
+            else:
+                nfx = (rec_intrinsic_maps[:, 0] * vm_float).mean(dim=[-2, -1]) / (vm_float.mean(dim=[-2, -1]) + 1e-4)
+                nfy = (rec_intrinsic_maps[:, 1] * vm_float).mean(dim=[-2, -1]) / (vm_float.mean(dim=[-2, -1]) + 1e-4)
+                rec_intrinsic_maps = jt.stack([nfx, nfy], dim=-1)[:, :, None, None]    # (T,2,1,1)
+
+        rec_point_maps = jt.concat(
+            [rec_intrinsic_maps * mesh_grid, rec_depth_maps], dim=1
+        ).permute(0, 2, 3, 1)     
+        xy, z = jt.split(rec_point_maps, [2, 1], dim=-1)
+        z = jt.exp(jt.minimum(z, 10.0))         
+        rec_point_maps = jt.concat([xy * z, z], dim=-1)   
+
+        return rec_point_maps, rec_valid_masks      
+
+    @jt.no_grad()                                    # ↔︎ @torch.no_grad()
+    def __call__(
+        self,
+        video           : Union[np.ndarray, jt.Var], # (T,H,W,C) or (T,C,H,W), range [0,1]
+        point_map_vae,
+        prior_model,
+        *,
+        height          : int = 576,
+        width           : int = 1024,
+        num_inference_steps : int = 5,
+        guidance_scale  : float = 1.0,
+        window_size     : Optional[int] = 14,
+        noise_aug_strength : float = 0.02,
+        decode_chunk_size  : Optional[int] = None,
+        generator = None,
+        latents         : Optional[jt.Var] = None,
+        callback_on_step_end: Optional[Callable[[int,int,Dict],None]] = None,
+        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        overlap         : int  = 4,
+        force_projection: bool = True,
+        force_fixed_focal: bool = True,
+        use_extract_interp: bool = False,
+        track_time      : bool = False,
+        low_memory_usage: bool = False
+    ):
+        # ---------- 0. 输入规范化 ----------
         if isinstance(video, np.ndarray):
-            video = torch.from_numpy(video.transpose(0, 3, 1, 2))
+            video = jt.Var(video.transpose(0, 3, 1, 2))     # (T,C,H,W)
         else:
-            assert isinstance(video, torch.Tensor)
-        height = height or video.shape[-2]
-        width = width or video.shape[-1]
-        original_height = video.shape[-2]
-        original_width = video.shape[-1]
-        num_frames = video.shape[0]
-        decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else 8
-        if num_frames <= window_size:
-            window_size = num_frames
-            overlap = 0
+            assert isinstance(video, jt.Var)
+
+        height  = height  or video.shape[-2]
+        width   = width   or video.shape[-1]
+        oH, oW  = video.shape[-2], video.shape[-1]
+        T       = video.shape[0]
+        decode_chunk_size = decode_chunk_size or 8
+
+        if T <= window_size:
+            window_size, overlap = T, 0
         stride = window_size - overlap
 
-        # 1. Check inputs. Raise error if not correct
         assert height % 64 == 0 and width % 64 == 0
-        if original_height != height or original_width != width:
-            need_resize = True
-        else:
-            need_resize = False
+        need_resize = (oH != height) or (oW != width)
 
-        # 2. Define call parameters
-        batch_size = 1
-        device = self._execution_device
-        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
-        # corresponds to doing no classifier free guidance.
+
         self._guidance_scale = guidance_scale
+        if track_time: t0 = time.perf_counter()
 
-        if track_time:
-            print(f'Processing video shape : {list(video.shape)}')
-            start_event = torch.cuda.Event(enable_timing=True)
-            prior_event = torch.cuda.Event(enable_timing=True)
-            encode_event = torch.cuda.Event(enable_timing=True)
-            denoise_event = torch.cuda.Event(enable_timing=True)
-            decode_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
+        pred_disp, pred_mask, pred_pmap, pred_imap = self.produce_priors(
+            prior_model,
+            video.cast(jt.float32) if low_memory_usage else video.cast(jt.float32).to(self._execution_device),
+            chunk_size = decode_chunk_size,
+            low_memory_usage = low_memory_usage,
+        )                                                  # 形状与原版一致
 
-        # 3. Encode input video
-        pred_disparity, pred_valid_mask, pred_point_map, pred_intrinsic_map = self.produce_priors(
-            prior_model, 
-            video.to(torch.float32) if low_memory_usage else video.to(device=device, dtype=torch.float32),
-            chunk_size=decode_chunk_size,
-            low_memory_usage=low_memory_usage
-        ) # T,H,W T,H,W T,3,H,W T,2,H,W
-
+        # optional resize
         if need_resize:
-            pred_disparity = F.interpolate(pred_disparity.unsqueeze(1), (height, width), mode='bilinear', align_corners=False).squeeze(1)
-            pred_valid_mask = F.interpolate(pred_valid_mask.unsqueeze(1), (height, width), mode='bilinear', align_corners=False).squeeze(1)
-            # transform the log-depth to depth domain for bilinear interpolation
-            pred_point_map = torch.cat([
-                F.interpolate(pred_point_map[:, 0:2], (height, width), mode='bilinear', align_corners=False),
-                F.interpolate(pred_point_map[:, 2:3].clamp_max(10).exp(), (height, width), mode='bilinear', align_corners=False).log()
+            pred_disp  = nn.interpolate(pred_disp.unsqueeze(1),  size=(height,width), mode='bilinear', align_corners=False).squeeze(1)
+            pred_mask  = nn.interpolate(pred_mask.unsqueeze(1),  size=(height,width), mode='bilinear', align_corners=False).squeeze(1)
+            pred_pmap  = jt.concat([
+                nn.interpolate(pred_pmap[:,0:2],             size=(height,width), mode='bilinear', align_corners=False),
+                nn.interpolate(jt.exp(jt.minimum(pred_pmap[:,2:3],10.0)), size=(height,width), mode='bilinear', align_corners=False).log()
             ], dim=1)
-            pred_intrinsic_map = F.interpolate(pred_intrinsic_map, (height, width), mode='bilinear', align_corners=False)
-
+            pred_imap  = nn.interpolate(pred_imap, size=(height,width), mode='bilinear', align_corners=False)
 
         if track_time:
-            prior_event.record()
-            torch.cuda.synchronize()
-            elapsed_time_ms = start_event.elapsed_time(prior_event)
-            print(f"Elapsed time for computing per-frame prior: {elapsed_time_ms} ms")
+            print(f'[timer] prior  : {(time.perf_counter()-t0)*1e3:.1f} ms'); t1 = time.perf_counter()
         else:
-            gc.collect()
-            torch.cuda.empty_cache()
+            gc.collect(); jt.sync_all()
 
-
-        # 3. Encode input video
         if need_resize:
-            video = F.interpolate(video, (height, width), mode="bicubic", align_corners=False, antialias=True).clamp(0, 1)
-        video = video.to(device=device, dtype=self.dtype)
-        video = video * 2.0 - 1.0  # [0,1] -> [-1,1], in [t, c, h, w]
+            video = nn.interpolate(video, size=(height,width), mode="bicubic", align_corners=False).clamp(0,1)
+        video = video.cast(self.dtype) * 2.0 - 1.0                          # [-1,1]
+        video_emb = self.encode_video(video, chunk_size=decode_chunk_size).unsqueeze(0)
 
-        video_embeddings = self.encode_video(video, chunk_size=decode_chunk_size).unsqueeze(0)
+        needs_upcast = (self.vae.dtype == jt.float16 and self.vae.config.force_upcast)
+        if needs_upcast: self.vae.to(dtype=jt.float32)
 
-        # 4. Encode input image using VAE
+        video_lat   = self.encode_vae_video(video.cast(self.vae.dtype),
+                                            chunk_size=decode_chunk_size).unsqueeze(0).cast(video_emb.dtype)
 
-        # pdb.set_trace()
-        needs_upcasting = (
-            self.vae.dtype == torch.float16 and self.vae.config.force_upcast
-        )
-        if needs_upcasting:
-            self.vae.to(dtype=torch.float32)
+        if low_memory_usage: del video; gc.collect(); jt.sync_all()
 
-        video_latents = self.encode_vae_video(
-            video.to(self.vae.dtype),
-            chunk_size=decode_chunk_size,
-        ).unsqueeze(0).to(video_embeddings.dtype)  # [1, t, c, h, w]
-
-        if low_memory_usage:
-            del video
-            torch.cuda.empty_cache()
-
-        prior_latents = self.encode_point_map(
+        prior_lat   = self.encode_point_map_jt(
             point_map_vae,
-            pred_disparity, 
-            pred_valid_mask, 
-            pred_point_map, 
-            pred_intrinsic_map, 
+            pred_disp, pred_mask, pred_pmap, pred_imap,
             chunk_size=decode_chunk_size,
             low_memory_usage=low_memory_usage
-        ).unsqueeze(0).to(video_embeddings.dtype) # 1,T,C,H,W
-        
+        ).unsqueeze(0).cast(video_emb.dtype)
 
         if track_time:
-            encode_event.record()
-            torch.cuda.synchronize()
-            elapsed_time_ms = prior_event.elapsed_time(encode_event)
-            print(f"Elapsed time for encode prior and frames: {elapsed_time_ms} ms")
+            print(f'[timer] encode : {(time.perf_counter()-t1)*1e3:.1f} ms'); t2 = time.perf_counter()
         else:
-            gc.collect()
-            torch.cuda.empty_cache()
+            gc.collect(); jt.sync_all()
 
-        # cast back to fp16 if needed
-        if needs_upcasting:
-            self.vae.to(dtype=torch.float16)
+        if needs_upcast: self.vae.to(dtype=jt.float16)
 
-        # 5. Get Added Time IDs
         added_time_ids = self._get_add_time_ids(
-            7,
-            127,
-            noise_aug_strength,
-            video_embeddings.dtype,
-            batch_size,
-            1,
-            False,
-        )  # [1 or 2, 3]
-        added_time_ids = added_time_ids.to(device)
-
-        # 6. Prepare timesteps
+            7, 127, noise_aug_strength, video_emb.dtype, 1, 1, False
+        ).to(self._execution_device)
         timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler, num_inference_steps, device, None, None
+            self.scheduler, num_inference_steps, self._execution_device, None, None
         )
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
-        # 7. Prepare latent variables
-        # num_channels_latents = self.unet.config.in_channels - prior_latents.shape[1]
-        num_channels_latents = 8
+        num_channels_latents = 8  # = in_channels -  prior_channels
         latents_init = self.prepare_latents(
-            batch_size,
-            window_size,
-            num_channels_latents,
-            height,
-            width,
-            video_embeddings.dtype,
-            device,
-            generator,
-            latents,
-        )  # [1, t, c, h, w]
+            1, window_size, num_channels_latents, height, width,
+            video_emb.dtype, self._execution_device, generator, latents
+        )                                  # (1,T,C,H,W)
         latents_all = None
 
-        idx_start = 0
         if overlap > 0:
-            weights = torch.linspace(0, 1, overlap, device=device)
-            weights = weights.view(1, overlap, 1, 1, 1)
+            weights = jt.linspace(0,1,overlap).view(1,overlap,1,1,1).to(self._execution_device)
         else:
             weights = None
 
-        while idx_start < num_frames - overlap:
-            idx_end = min(idx_start + window_size, num_frames)
-            self.scheduler.set_timesteps(num_inference_steps, device=device)
-            # 9. Denoising loop
-            # latents_init = latents_init.flip(1)
-            latents = latents_init[:, : idx_end - idx_start].clone()
-            latents_init = torch.cat(
-                [latents_init[:, -overlap:], latents_init[:, :stride]], dim=1
-            )
+        idx_start = 0
+        while idx_start < T - overlap:
+            idx_end = min(idx_start + window_size, T)
+            self.scheduler.set_timesteps(num_inference_steps, device=self._execution_device)
 
-            video_latents_current = video_latents[:, idx_start:idx_end]
-            prior_latents_current = prior_latents[:, idx_start:idx_end]
-            video_embeddings_current = video_embeddings[:, idx_start:idx_end]
+            latents      = latents_init[:, :idx_end-idx_start].clone()
+            latents_init = jt.concat([latents_init[:, -overlap:], latents_init[:, :stride]], dim=1)
 
-            with self.progress_bar(total=num_inference_steps) as progress_bar:
+            v_lat_cur  = video_lat [:, idx_start:idx_end]
+            p_lat_cur  = prior_lat [:, idx_start:idx_end]
+            v_emb_cur  = video_emb [:, idx_start:idx_end]
+            with self.progress_bar(total=num_inference_steps) as pbar:
                 for i, t in enumerate(timesteps):
-                    if latents_all is not None and i == 0:
+                    if latents_all is not None and i == 0 and overlap>0:
                         latents[:, :overlap] = (
                             latents_all[:, -overlap:]
-                            + latents[:, :overlap]
-                            / self.scheduler.init_noise_sigma
+                            + latents[:, :overlap] / self.scheduler.init_noise_sigma
                             * self.scheduler.sigmas[i]
                         )
 
-                    latent_model_input = latents
+                    l_in = self.scheduler.scale_model_input(latents, t)
+                    l_in = jt.concat([l_in, v_lat_cur, p_lat_cur], dim=2)
 
-                    latent_model_input = self.scheduler.scale_model_input(
-                        latent_model_input, t
-                    )  # [1 or 2, t, c, h, w]
-                    latent_model_input = torch.cat(
-                        [latent_model_input, video_latents_current, prior_latents_current], dim=2
-                    )
                     noise_pred = self.unet(
-                        latent_model_input,
-                        t,
-                        encoder_hidden_states=video_embeddings_current,
+                        l_in, t,
+                        encoder_hidden_states=v_emb_cur,
                         added_time_ids=added_time_ids,
                         return_dict=False,
                     )[0]
-                    # pdb.set_trace()
-                    # perform guidance
+
+                    # classifier-free guidance
                     if self.do_classifier_free_guidance:
-                        latent_model_input = latents
-                        latent_model_input = self.scheduler.scale_model_input(
-                            latent_model_input, t
-                        )
-                        latent_model_input = torch.cat(
-                            [latent_model_input, torch.zeros_like(latent_model_input), torch.zeros_like(latent_model_input)],
-                            dim=2,
-                        )
-                        noise_pred_uncond = self.unet(
-                            latent_model_input,
-                            t,
-                            encoder_hidden_states=torch.zeros_like(
-                                video_embeddings_current
-                            ),
+                        l_in_uc = self.scheduler.scale_model_input(latents, t)
+                        l_in_uc = jt.concat([l_in_uc,
+                                            jt.zeros_like(l_in_uc),
+                                            jt.zeros_like(l_in_uc)], dim=2)
+                        noise_uncond = self.unet(
+                            l_in_uc, t,
+                            encoder_hidden_states=jt.zeros_like(v_emb_cur),
                             added_time_ids=added_time_ids,
                             return_dict=False,
                         )[0]
-                        noise_pred = noise_pred_uncond + self.guidance_scale * (
-                            noise_pred - noise_pred_uncond
-                        )
+                        noise_pred = noise_uncond + self.guidance_scale * (noise_pred - noise_uncond)
+
                     latents = self.scheduler.step(noise_pred, t, latents).prev_sample
 
                     if callback_on_step_end is not None:
-                        callback_kwargs = {}
-                        for k in callback_on_step_end_tensor_inputs:
-                            callback_kwargs[k] = locals()[k]
-                        callback_outputs = callback_on_step_end(
-                            self, i, t, callback_kwargs
-                        )
+                        cb_kwargs = {k: locals()[k] for k in callback_on_step_end_tensor_inputs}
+                        latents = callback_on_step_end(self, i, t, cb_kwargs).get("latents", latents)
 
-                        latents = callback_outputs.pop("latents", latents)
+                    if i == len(timesteps)-1 or ((i+1) > num_warmup_steps and (i+1)%self.scheduler.order==0):
+                        pbar.update()
 
-                    if i == len(timesteps) - 1 or (
-                        (i + 1) > num_warmup_steps
-                        and (i + 1) % self.scheduler.order == 0
-                    ):
-                        progress_bar.update()
-
+            # 拼接 window 结果
             if latents_all is None:
                 latents_all = latents.clone()
             else:
-                if overlap > 0:
-                    latents_all[:, -overlap:] = latents[
-                        :, :overlap
-                    ] * weights + latents_all[:, -overlap:] * (1 - weights)
-                latents_all = torch.cat([latents_all, latents[:, overlap:]], dim=1)
+                if overlap>0:
+                    latents_all[:, -overlap:] = latents[:, :overlap]*weights + latents_all[:, -overlap:]*(1-weights)
+                latents_all = jt.concat([latents_all, latents[:, overlap:]], dim=1)
 
             idx_start += stride
 
-        latents_all = 1 / self.vae.config.scaling_factor * latents_all.squeeze(0).to(torch.float32)
+        latents_all = latents_all.squeeze(0) / self.vae.config.scaling_factor
+        latents_all = latents_all.cast(jt.float32)
 
         if low_memory_usage:
-            del latents
-            del prior_latents
-            del latent_model_input
-            del latents_init
-            del noise_pred
-            torch.cuda.empty_cache()
+            del latents, prior_lat, video_lat; gc.collect(); jt.sync_all()
 
         if track_time:
-            denoise_event.record()
-            torch.cuda.synchronize()
-            elapsed_time_ms = encode_event.elapsed_time(denoise_event)
-            print(f"Elapsed time for denoise latent: {elapsed_time_ms} ms")
+            print(f'[timer] denoise: {(time.perf_counter()-t2)*1e3:.1f} ms'); t3 = time.perf_counter()
         else:
-            gc.collect()
-            torch.cuda.empty_cache()
+            gc.collect(); jt.sync_all()
 
-        point_map, valid_mask = self.decode_point_map(
-            point_map_vae, 
-            latents_all, 
-            chunk_size=decode_chunk_size, 
-            force_projection=force_projection,
-            force_fixed_focal=force_fixed_focal,
-            use_extract_interp=use_extract_interp, 
-            need_resize=need_resize, 
-            height=original_height, 
-            width=original_width,
-            low_memory_usage=low_memory_usage 
+        point_map, valid_mask = self.decode_point_map_jt(
+            point_map_vae, latents_all,
+            chunk_size = decode_chunk_size,
+            force_projection = force_projection,
+            force_fixed_focal = force_fixed_focal,
+            use_extract_interp = use_extract_interp,
+            need_resize = need_resize,
+            height = oH, width = oW,
+            low_memory_usage = low_memory_usage
         )
-        
 
         if track_time:
-            decode_event.record()
-            torch.cuda.synchronize()
-            elapsed_time_ms = denoise_event.elapsed_time(decode_event)
-            print(f"Elapsed time for decode latent: {elapsed_time_ms} ms")
+            print(f'[timer] decode : {(time.perf_counter()-t3)*1e3:.1f} ms')
         else:
-            gc.collect()
-            torch.cuda.empty_cache()
+            gc.collect(); jt.sync_all()
 
         self.maybe_free_model_hooks()
-        # t,h,w,3   t,h,w
-        return point_map, valid_mask
+        return point_map, valid_mask        
