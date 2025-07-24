@@ -1,9 +1,14 @@
-# GeometryCrafter: Dual Environment Setup (Jittor + PyTorch for MoGe)
+# GeometryCrafter (Jittor Version)
 
-This project separates the Jittor inference and the PyTorch-based MoGe prior module into two isolated Conda environments to avoid conflicts in dependencies and CUDA toolkits.
+This repository is a **Jittor-based reimplementation** of [TencentARC/GeometryCrafter](https://github.com/TencentARC/GeometryCrafter), originally written in PyTorch. GeometryCrafter is a framework for controllable geometry-oriented video generation, supporting point-cloud and depth-aware synthesis from text and video prompts.
+
+In this version, we migrate the main inference pipeline to [Jittor](https://github.com/Jittor/jittor) for high-performance and flexible execution on research platforms where Jittor is preferred or required.
+
+To ensure compatibility with the original [MoGe](https://github.com/microsoft/MoGe) prior module (which is tightly coupled to PyTorch), we run it in a separate Conda environment and communicate through a subprocess interface.
+
+> ⚙️ This dual-environment design ensures Jittor and PyTorch can coexist without dependency conflicts, especially across CUDA versions.
 
 ---
-
 ## 📁 Directory Overview
 
 ```
