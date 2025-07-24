@@ -9,7 +9,7 @@ To ensure compatibility with the original [MoGe](https://github.com/microsoft/Mo
 > ⚙️ This dual-environment design ensures Jittor and PyTorch can coexist without dependency conflicts, especially across CUDA versions.
 
 ---
-## 📁 Directory Overview
+## Directory Overview
 
 ```
 GeometryCrafter/
@@ -23,7 +23,7 @@ GeometryCrafter/
 
 ---
 
-## 🧪 Setup Two Environments
+## Setup Two Environments
 
 ### Environment 1: Jittor (named `geo_jt`)
 
@@ -51,7 +51,7 @@ python -m pip install --no-cache-dir -r requirements_torch.txt
 
 ---
 
-## 🚀 Run Main Pipeline (Jittor side)
+## Run Main Pipeline (Jittor side)
 
 ```bash
 conda activate geo_jt
@@ -70,7 +70,7 @@ The pipeline automatically launches the subprocess using:
 conda run -n geo_torch python moge_worker.py /tmp/input.npy
 ```
 
-## 📝 Protocol: MoGe Worker Communication
+## Protocol: MoGe Worker Communication
 
 - Input: `.npy` file (shape `(1, 3, H, W)`)
 - Output: JSON line via stdout like:
@@ -82,4 +82,4 @@ conda run -n geo_torch python moge_worker.py /tmp/input.npy
 
 This dual-environment approach is robust for managing CUDA/toolkit incompatibilities and enables clean modular execution.
 
-Happy GeometryCrafting 🎨
+Happy GeometryCrafting 
