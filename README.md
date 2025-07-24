@@ -67,22 +67,6 @@ conda run -n geo_torch python moge_worker.py /tmp/input.npy
 
 ---
 
-## 🧠 Optional: Persistent Subprocess Mode
-
-To avoid repeated startup cost of MoGe model, use a persistent subprocess:
-
-```python
-# Inside diff_ppl_jt.py
-self._torch_worker = subprocess.Popen(
-    ["conda", "run", "-n", "geo_torch", "python", "-u", "moge_worker_long.py"],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1
-)
-```
-
-Then send JSON through `stdin`, and parse result from `stdout`.
-
----
-
 ## 🧰 Troubleshooting
 
 | Issue | Solution |
