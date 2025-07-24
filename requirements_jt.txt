@@ -1,0 +1,13 @@
+git+https://github.com/JittorRepos/jittor
+git+https://github.com/JittorRepos/jtorch
+git+https://github.com/JittorRepos/diffusers_jittor
+git+https://github.com/JittorRepos/transformers_jittor
+mediapy==1.2.2
+fire==0.7.0
+decord==0.6.0
+OpenEXR==3.3.2
+kornia==0.7.4
+opencv-python==4.10.0.84
+h5py==3.12.1
+moderngl==5.12.0
+piqp==0.4.2
