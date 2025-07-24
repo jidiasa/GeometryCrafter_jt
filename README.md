@@ -46,23 +46,6 @@ python -m pip install --no-cache-dir -r requirements_torch.txt
 
 ---
 
-## ✅ Test the MoGe Worker
-
-```bash
-conda activate geo_torch
-python moge_worker.py /path/to/test.npy
-```
-
-Expected output:
-
-```
-[worker] loading /path/to/test.npy
-[worker] shape (1, 3, 64, 64)
-{"p": "/tmp/xxx.npy", "m": "/tmp/yyy.npy"}
-```
-
----
-
 ## 🚀 Run Main Pipeline (Jittor side)
 
 ```bash
