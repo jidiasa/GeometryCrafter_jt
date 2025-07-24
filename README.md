@@ -65,19 +65,6 @@ The pipeline automatically launches the subprocess using:
 conda run -n geo_torch python moge_worker.py /tmp/input.npy
 ```
 
----
-
-## 🧰 Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| Pip installs to `~/.local` | Set `PYTHONNOUSERSITE=1` or use `--no-user` option |
-| `jtorch.*` error in Jittor env | Avoid importing PyTorch inside `geo_jt` |
-| `JSONDecodeError` or `BrokenPipeError` | Ensure `moge_worker.py` outputs **exactly one line** of valid JSON and flushes it |
-| Subprocess exits silently | Use `stderr=subprocess.STDOUT` in `Popen` to capture all logs |
-
----
-
 ## 📝 Protocol: MoGe Worker Communication
 
 - Input: `.npy` file (shape `(1, 3, H, W)`)
